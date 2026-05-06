@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>RTS Game - Command & Conquer Style</title>
+    <title>Titan War</title>
     <link rel="stylesheet" href="style.css">
 </head>
 <body>
@@ -56,6 +56,11 @@
                     <button class="build-btn" data-type="turret" data-cost="200">
                         🔫 Turret (200)
                     </button>
+                    <hr style="margin: 10px 0; border-color: #FF5722;">
+                    <h4 style="color: #FF5722; margin: 5px 0;">☢ NUCLEAR</h4>
+                    <button class="build-btn" data-type="missile_silo" data-cost="1500">
+                        🚀 Missile Silo (1500)
+                    </button>
                 </div>
                 <div id="unit-menu" class="menu-panel">
                     <h3>Unit Production</h3>
@@ -98,6 +103,9 @@
                         ⚔️ Attack Mode (A)
                     </button>
                     <button id="stop-btn">⏹️ Stop (S)</button>
+                    <button id="launch-nuke-btn" style="background:#FF5722;display:none;width:100%;margin-top:5px;">☢ Launch Nuke (800)</button>
+                    <hr style="margin: 10px 0; border-color: #1565C0;">
+                    <button id="campaign-btn" style="background:#1565C0;width:100%;">🗺 Campaign Menu</button>
                     <hr style="margin: 10px 0; border-color: #FFD700;">
                     <h3 style="color: #FFD700;">💰 CHEATS 💰</h3>
                     <button id="add-money-btn" style="background: #4CAF50;">+5000 Credits</button>

@@ -16,25 +16,24 @@ export class GameAI {
         this.attackTimer += deltaTime;
         this.buildTimer += deltaTime;
 
-        // Update AI every 2 seconds
         if (this.updateTimer >= 2) {
             this.updateTimer = 0;
             this.makeDecisions();
         }
 
-        // Attack every 10 seconds
-        if (this.attackTimer >= 10) {
+        // Attack faster when army is larger
+        const combatUnits = this.game.units.filter(u => u.team === this.team && u.type !== 'harvester');
+        const attackInterval = combatUnits.length >= 12 ? 6 : combatUnits.length >= 6 ? 9 : 14;
+        if (this.attackTimer >= attackInterval) {
             this.attackTimer = 0;
             this.launchAttack();
         }
 
-        // Try to build every 5 seconds
         if (this.buildTimer >= 5) {
             this.buildTimer = 0;
             this.tryBuild();
         }
 
-        // Gather passive income
         this.credits += deltaTime * 10;
     }
 
@@ -42,33 +41,44 @@ export class GameAI {
         const myUnits = this.game.units.filter(u => u.team === this.team);
         const myBuildings = this.game.buildings.filter(b => b.team === this.team);
 
-        // Check if we have HQ
         const hasHQ = myBuildings.some(b => b.type === 'hq');
-        if (!hasHQ) return; // AI defeated
+        if (!hasHQ) return;
 
-        // Produce units if we have production buildings
         const barracks = myBuildings.find(b => b.type === 'barracks');
         const factory = myBuildings.find(b => b.type === 'factory');
+        const combatUnits = myUnits.filter(u => u.type !== 'harvester');
+        const tanks = combatUnits.filter(u => u.type === 'tank').length;
+        const snipers = combatUnits.filter(u => u.type === 'sniper').length;
 
-        if (barracks && this.credits >= 100 && myUnits.length < 15) {
+        if (barracks && this.credits >= 100 && combatUnits.length < 20) {
             this.produceUnit('soldier', barracks, 100);
         }
 
-        if (factory && this.credits >= 300 && myUnits.length < 10) {
-            this.produceUnit('tank', factory, 300);
+        // Alternate between tanks and snipers for variety
+        if (factory && combatUnits.length < 20) {
+            if (tanks <= snipers && this.credits >= 300) {
+                this.produceUnit('tank', factory, 300);
+            } else if (this.credits >= 250) {
+                this.produceUnit('sniper', factory, 250);
+            }
         }
 
-        // Set idle units to patrol
-        myUnits.forEach(unit => {
+        // Patrol toward center and resource deposits, not just home base
+        const patrolTargets = [
+            { x: 1500, y: 1000 },
+            { x: 1100, y: 950 },
+            { x: 1850, y: 950 },
+            { x: 1500, y: 600 },
+            { x: 1000, y: 1700 },
+        ];
+
+        combatUnits.forEach(unit => {
             if (!unit.target && !unit.attackMove) {
                 const dx = unit.x - unit.targetX;
                 const dy = unit.y - unit.targetY;
-                const dist = Math.sqrt(dx * dx + dy * dy);
-
-                // If reached destination, find new patrol point
-                if (dist < 10) {
-                    unit.targetX = 2300 + Math.random() * 400;
-                    unit.targetY = 1300 + Math.random() * 400;
+                if (Math.sqrt(dx * dx + dy * dy) < 10) {
+                    const pt = patrolTargets[Math.floor(Math.random() * patrolTargets.length)];
+                    unit.moveTo(pt.x + (Math.random() - 0.5) * 150, pt.y + (Math.random() - 0.5) * 150);
                     unit.attackMove = true;
                 }
             }
@@ -77,12 +87,9 @@ export class GameAI {
 
     produceUnit(type, building, cost) {
         if (this.credits >= cost) {
-            const unit = createUnit(
-                type,
-                building.x + 50,
-                building.y + 50,
-                this.team
-            );
+            const tempUnit = createUnit(type, 0, 0, this.team);
+            const spawnPos = this.game.findSpawnPosition(building, tempUnit.size);
+            const unit = createUnit(type, spawnPos.x, spawnPos.y, this.team);
             this.game.units.push(unit);
             this.credits -= cost;
         }
@@ -90,42 +97,65 @@ export class GameAI {
 
     tryBuild() {
         const myBuildings = this.game.buildings.filter(b => b.team === this.team);
+        const myHQ = myBuildings.find(b => b.type === 'hq');
+        if (!myHQ) return;
 
         const hasBarracks = myBuildings.some(b => b.type === 'barracks');
         const hasFactory = myBuildings.some(b => b.type === 'factory');
         const hasPower = myBuildings.some(b => b.type === 'power');
+        const hasRefinery = myBuildings.some(b => b.type === 'refinery');
 
-        // Build priority: power -> barracks -> factory
-        if (!hasPower && this.credits >= 200) {
-            const building = createBuilding('power', 2600, 1450, this.team);
-            this.game.buildings.push(building);
-            this.credits -= 200;
-        } else if (!hasBarracks && this.credits >= 300) {
-            const building = createBuilding('barracks', 2550, 1550, this.team);
-            this.game.buildings.push(building);
-            this.credits -= 300;
-        } else if (!hasFactory && this.credits >= 500 && hasBarracks) {
-            const building = createBuilding('factory', 2650, 1500, this.team);
-            this.game.buildings.push(building);
-            this.credits -= 500;
-        }
+        // Slot positions around HQ instead of hardcoded map coords
+        const buildSlots = [
+            { dx: 120, dy: 0 },
+            { dx: 0, dy: 120 },
+            { dx: -120, dy: 0 },
+            { dx: 0, dy: -120 },
+            { dx: 120, dy: -120 },
+            { dx: -120, dy: 120 },
+        ];
+
+        const tryPlace = (type, cost) => {
+            if (this.credits < cost) return false;
+            for (const slot of buildSlots) {
+                const x = myHQ.x + slot.dx;
+                const y = myHQ.y + slot.dy;
+                if (this.game.isValidBuildLocation(x, y)) {
+                    this.game.buildings.push(createBuilding(type, x, y, this.team));
+                    this.credits -= cost;
+                    return true;
+                }
+            }
+            return false;
+        };
+
+        // Build priority: refinery (income) -> power -> barracks -> factory
+        if (!hasRefinery) tryPlace('refinery', 400);
+        else if (!hasPower) tryPlace('power', 200);
+        else if (!hasBarracks) tryPlace('barracks', 300);
+        else if (!hasFactory && hasBarracks) tryPlace('factory', 500);
     }
 
     launchAttack() {
         const myUnits = this.game.units.filter(u => u.team === this.team && u.type !== 'harvester');
+        if (myUnits.length < 3) return;
 
-        // Find player base location
-        const playerHQ = this.game.buildings.find(b => b.team === this.game.playerTeam && b.type === 'hq');
+        // Prioritise economy/production buildings over HQ
+        const buildingPriority = { refinery: 4, barracks: 3, factory: 3, turret: 2, power: 2, hq: 1 };
+        const playerBuildings = this.game.buildings.filter(b => b.team === this.game.playerTeam);
+        const target = [...playerBuildings].sort((a, b) =>
+            (buildingPriority[b.type] || 0) - (buildingPriority[a.type] || 0)
+        )[0];
 
-        if (playerHQ && myUnits.length >= 5) {
-            // Send attack force
-            const attackForce = myUnits.slice(0, Math.floor(myUnits.length * 0.7));
+        if (!target) return;
 
-            attackForce.forEach(unit => {
-                unit.targetX = playerHQ.x + (Math.random() - 0.5) * 100;
-                unit.targetY = playerHQ.y + (Math.random() - 0.5) * 100;
-                unit.attackMove = true;
-            });
-        }
+        const attackForce = myUnits.slice(0, Math.floor(myUnits.length * 0.7));
+        attackForce.forEach(unit => {
+            unit.moveTo(
+                target.x + (Math.random() - 0.5) * 100,
+                target.y + (Math.random() - 0.5) * 100
+            );
+            unit.attackMove = true;
+        });
     }
 }
