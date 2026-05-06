@@ -1,0 +1,113 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>RTS Game - Command & Conquer Style</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+    <div id="game-container">
+        <div id="ui-top">
+            <div id="resources">
+                <div class="resource-display">
+                    <span class="resource-label">Credits:</span>
+                    <span id="credits">1000</span>
+                </div>
+                <div class="resource-display">
+                    <span class="resource-label">Power:</span>
+                    <span id="power">0/0</span>
+                </div>
+            </div>
+            <div id="game-info">
+                <span id="selected-info">Select a unit or building</span>
+            </div>
+        </div>
+
+        <canvas id="gameCanvas" width="1200" height="700"></canvas>
+
+        <div id="ui-bottom">
+            <div id="control-panel">
+                <div id="minimap-container">
+                    <canvas id="minimap" width="200" height="133"></canvas>
+                    <button id="goto-base-btn" style="width: 100%; margin-top: 5px; background: #1976D2;">
+                        🏠 Go to Base
+                    </button>
+                </div>
+                <div id="build-menu" class="menu-panel">
+                    <h3>Build Menu</h3>
+                    <button class="build-btn" data-type="barracks" data-cost="300">
+                        Barracks (300)
+                    </button>
+                    <button class="build-btn" data-type="factory" data-cost="500">
+                        War Factory (500)
+                    </button>
+                    <button class="build-btn" data-type="power" data-cost="200">
+                        Power Plant (200)
+                    </button>
+                    <button class="build-btn" data-type="refinery" data-cost="400">
+                        Refinery (400)
+                    </button>
+                    <hr style="margin: 10px 0; border-color: #FFD700;">
+                    <h4 style="color: #FFD700; margin: 5px 0;">🛡️ DEFENSE</h4>
+                    <button class="build-btn" data-type="sandbag" data-cost="50">
+                        🛡️ Sandbag (50)
+                    </button>
+                    <button class="build-btn" data-type="turret" data-cost="200">
+                        🔫 Turret (200)
+                    </button>
+                </div>
+                <div id="unit-menu" class="menu-panel">
+                    <h3>Unit Production</h3>
+                    <button class="unit-btn" data-type="soldier" data-cost="100">
+                        Soldier (100)
+                    </button>
+                    <button class="unit-btn" data-type="tank" data-cost="300">
+                        Tank (300)
+                    </button>
+                    <button class="unit-btn" data-type="harvester" data-cost="200">
+                        Harvester (200)
+                    </button>
+                    <button class="unit-btn" data-type="sniper" data-cost="250">
+                        🎯 Sniper (250)
+                    </button>
+                    <button class="unit-btn" data-type="artillery" data-cost="600">
+                        💣 Artillery (600)
+                    </button>
+                    <button class="unit-btn" data-type="commando" data-cost="500">
+                        ⚡ Commando (500)
+                    </button>
+                </div>
+                <div id="action-panel">
+                    <h3>Production Queue</h3>
+                    <div id="production-queue" style="font-size: 11px; color: #FFD700; margin-bottom: 10px; max-height: 80px; overflow-y: auto;">
+                        <span style="color: #888;">Nothing in production</span>
+                    </div>
+                    <hr style="margin: 10px 0; border-color: #FFD700;">
+                    <h3>Unit Commands</h3>
+                    <div id="command-help" style="font-size: 11px; color: #aaa; margin-bottom: 10px;">
+                        Select units, then:<br>
+                        • Right-click ground to MOVE<br>
+                        • Right-click enemy to ATTACK<br>
+                        • Or use buttons below:
+                    </div>
+                    <button id="move-mode-btn" style="background: #2196F3;">
+                        ➡️ Move Mode (M)
+                    </button>
+                    <button id="attack-mode-btn" style="background: #F44336;">
+                        ⚔️ Attack Mode (A)
+                    </button>
+                    <button id="stop-btn">⏹️ Stop (S)</button>
+                    <hr style="margin: 10px 0; border-color: #FFD700;">
+                    <h3 style="color: #FFD700;">💰 CHEATS 💰</h3>
+                    <button id="add-money-btn" style="background: #4CAF50;">+5000 Credits</button>
+                    <button id="spawn-army-btn" style="background: #F44336;">Spawn Army</button>
+                    <button id="nuke-enemy-btn" style="background: #FF9800;">☢️ Nuke Enemy Base</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="game-combined.js"></script>
+</body>
+</html>
