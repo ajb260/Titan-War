@@ -21,20 +21,22 @@ body {
 #ui-top {
     display: flex;
     justify-content: space-between;
-    padding: 10px 20px;
+    align-items: center;
+    padding: clamp(6px, 1vh, 14px) clamp(10px, 1.5vw, 24px);
     background: linear-gradient(to bottom, #2a2a2a, #1a1a1a);
     border-bottom: 2px solid #444;
+    flex-shrink: 0;
 }
 
 #resources {
     display: flex;
-    gap: 30px;
+    gap: clamp(16px, 2.5vw, 40px);
 }
 
 .resource-display {
     display: flex;
-    gap: 10px;
-    font-size: 18px;
+    gap: clamp(6px, 0.8vw, 14px);
+    font-size: clamp(14px, 1.8vh, 26px);
     font-weight: bold;
 }
 
@@ -51,40 +53,44 @@ body {
 }
 
 #game-info {
-    font-size: 14px;
+    font-size: clamp(11px, 1.4vh, 20px);
     color: #aaa;
 }
 
 #gameCanvas {
     flex: 1;
+    width: 100%;
+    min-width: 0;
+    min-height: 0;
     background: #2d5016;
     cursor: crosshair;
     display: block;
-    margin: 0 auto;
 }
 
 #ui-bottom {
     background: linear-gradient(to top, #2a2a2a, #1a1a1a);
     border-top: 2px solid #444;
-    padding: 10px;
+    padding: clamp(6px, 0.8vh, 14px);
+    flex-shrink: 0;
 }
 
 #control-panel {
     display: flex;
-    gap: 10px;
-    height: 180px;
+    gap: clamp(6px, 0.8vw, 14px);
+    height: clamp(180px, 26vh, 380px);
 }
 
 #minimap-container {
-    width: 200px;
+    width: clamp(140px, 16vw, 280px);
     flex-shrink: 0;
     display: flex;
     flex-direction: column;
 }
 
 #minimap {
-    width: 200px;
-    height: 133px;
+    width: 100%;
+    flex: 1;
+    min-height: 0;
     background: #000;
     border: 2px solid #666;
     cursor: pointer;
@@ -99,27 +105,32 @@ body {
     flex: 1;
     background: #222;
     border: 2px solid #666;
-    padding: 10px;
+    padding: clamp(6px, 0.8vh, 12px);
     overflow-y: auto;
 }
 
 .menu-panel h3 {
-    font-size: 14px;
+    font-size: clamp(12px, 1.6vh, 22px);
     color: #FFD700;
-    margin-bottom: 10px;
+    margin-bottom: clamp(6px, 0.8vh, 12px);
     border-bottom: 1px solid #444;
-    padding-bottom: 5px;
+    padding-bottom: clamp(3px, 0.4vh, 6px);
+}
+
+.menu-panel h4 {
+    font-size: clamp(11px, 1.4vh, 18px);
+    margin: clamp(4px, 0.5vh, 8px) 0;
 }
 
 button {
     width: 100%;
-    padding: 8px;
-    margin: 5px 0;
+    padding: clamp(5px, 0.8vh, 12px);
+    margin: clamp(3px, 0.4vh, 6px) 0;
     background: #333;
     color: #fff;
     border: 2px solid #555;
     cursor: pointer;
-    font-size: 12px;
+    font-size: clamp(11px, 1.4vh, 20px);
     transition: all 0.2s;
 }
 
@@ -138,8 +149,19 @@ button:disabled {
 }
 
 #action-panel {
-    width: 200px;
+    width: clamp(160px, 18vw, 300px);
     background: #222;
     border: 2px solid #666;
-    padding: 10px;
+    padding: clamp(6px, 0.8vh, 12px);
+    overflow-y: auto;
+}
+
+#production-queue {
+    font-size: clamp(10px, 1.3vh, 18px);
+}
+
+#command-help {
+    font-size: clamp(10px, 1.2vh, 16px);
+    color: #aaa;
+    margin-bottom: clamp(6px, 0.8vh, 12px);
 }

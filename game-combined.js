@@ -30,7 +30,7 @@ class Particle {
 
 // ========== PROJECTILES ==========
 class Projectile {
-    constructor(x, y, target, damage, speed, size, color, type) {
+    constructor(x, y, target, damage, speed, size, color, type, owner = null) {
         this.x = x;
         this.y = y;
         this.target = target;
@@ -40,6 +40,7 @@ class Projectile {
         this.color = color;
         this.type = type;
         this.dead = false;
+        this.owner = owner;
     }
 
     update(deltaTime) {
@@ -56,6 +57,9 @@ class Projectile {
         if (dist < this.speed * deltaTime) {
             // Hit the target
             this.target.hp -= this.damage;
+            if (this.target.hp <= 0 && this.owner && typeof this.owner.addKill === 'function') {
+                this.owner.addKill();
+            }
             this.dead = true;
         } else {
             // Move toward target
@@ -245,7 +249,8 @@ class Unit {
                 size: 12,
                 color: '#4CAF50',
                 weight: 1,
-                canCrush: false
+                canCrush: false,
+                visionRadius: 220
             },
             tank: {
                 maxHp: 150,
@@ -256,7 +261,8 @@ class Unit {
                 size: 20,
                 color: '#795548',
                 weight: 5,
-                canCrush: true
+                canCrush: true,
+                visionRadius: 200
             },
             harvester: {
                 maxHp: 100,
@@ -269,7 +275,8 @@ class Unit {
                 carrying: 0,
                 maxCarry: 500,
                 weight: 4,
-                canCrush: true
+                canCrush: true,
+                visionRadius: 160
             },
             sniper: {
                 maxHp: 60,
@@ -280,7 +287,8 @@ class Unit {
                 size: 13,
                 color: '#2196F3',
                 weight: 1,
-                canCrush: false
+                canCrush: false,
+                visionRadius: 320
             },
             artillery: {
                 maxHp: 120,
@@ -291,7 +299,8 @@ class Unit {
                 size: 25,
                 color: '#FF5722',
                 weight: 6,
-                canCrush: true
+                canCrush: true,
+                visionRadius: 160
             },
             commando: {
                 maxHp: 200,
@@ -302,7 +311,8 @@ class Unit {
                 size: 15,
                 color: '#9C27B0',
                 weight: 1,
-                canCrush: false
+                canCrush: false,
+                visionRadius: 260
             }
         };
 
@@ -310,12 +320,28 @@ class Unit {
         Object.assign(this, unitStats);
         this.hp = this.maxHp;
         this.attackCooldown = 0;
+        this.kills = 0;
+        this.veterancy = 0; // 0=rookie 1=veteran(3kills) 2=elite(8kills) 3=hero(18kills)
+        this.garrisonedIn = null;
 
         // Harvester-specific properties
         if (type === 'harvester') {
             this.targetDeposit = null; // Specific deposit to mine
             this.isMining = false; // Track mining state for animation
             this.shovelAngle = 0; // Shovel animation angle
+        }
+    }
+
+    addKill() {
+        this.kills++;
+        const thresholds = [3, 8, 18];
+        const newVet = thresholds.filter(t => this.kills >= t).length;
+        if (newVet > this.veterancy) {
+            this.veterancy = newVet;
+            const bonus = 0.15; // 15% per level
+            this.maxHp   = Math.round(this.maxHp * (1 + bonus));
+            this.damage  = Math.round(this.damage * (1 + bonus));
+            this.hp = Math.min(this.hp + this.maxHp * 0.2, this.maxHp); // small heal on level up
         }
     }
 
@@ -334,6 +360,7 @@ class Unit {
     }
 
     update(deltaTime, game) {
+        if (this.garrisonedIn) return; // garrisoned units don't move or act
         if (this.type === 'harvester') {
             this.updateHarvester(deltaTime, game);
             return;
@@ -532,10 +559,13 @@ class Unit {
         // Only targets units, not buildings (to avoid units wandering off to attack buildings)
         let nearestEnemy = null;
         let minDist = Infinity;
-        const detectionRange = 200; // Shorter range for auto-aggro
+        const detectionRange = 200;
+        const fogGrid = this.team === game.playerTeam ? game.playerFog : game.enemyFog;
 
         game.units.forEach(unit => {
             if (unit.team !== this.team && unit.type !== 'harvester') {
+                // Can only auto-aggro onto enemies the team can actually see
+                if (game.fogStateAt(unit.x, unit.y, fogGrid) !== 2) return;
                 const dx = unit.x - this.x;
                 const dy = unit.y - this.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
@@ -549,7 +579,7 @@ class Unit {
 
         if (nearestEnemy) {
             this.target = nearestEnemy;
-            this.attackMove = false; // Clear attack-move mode when auto-engaging
+            this.attackMove = false;
         }
     }
 
@@ -627,11 +657,13 @@ class Unit {
             speed,
             size,
             color,
-            projectileType
+            projectileType,
+            this
         );
     }
 
     render(ctx, camera) {
+        if (this.garrisonedIn) return; // garrisoned units are not rendered on map
         const screenX = this.x - camera.x;
         const screenY = this.y - camera.y;
 
@@ -777,6 +809,14 @@ class Unit {
         ctx.fillStyle = this.hp > this.maxHp * 0.3 ? '#4CAF50' : '#f44336';
         ctx.fillRect(barX, barY, barWidth * (this.hp / this.maxHp), barHeight);
 
+        if (this.veterancy > 0) {
+            ctx.fillStyle = this.veterancy === 3 ? '#FF6B35' : this.veterancy === 2 ? '#E0E0E0' : '#FFD700';
+            ctx.font = `${Math.round(this.size * 0.9)}px Arial`;
+            ctx.textAlign = 'center';
+            const stars = '★'.repeat(this.veterancy);
+            ctx.fillText(stars, screenX, barY - 2);
+        }
+
         // Harvester carrying indicator
         if (this.type === 'harvester' && this.carrying > 0) {
             ctx.fillStyle = '#FFD700';
@@ -822,42 +862,48 @@ class Building {
                 width: 80,
                 height: 80,
                 color: '#1976D2',
-                provides: 'command'
+                provides: 'command',
+                visionRadius: 280
             },
             barracks: {
                 maxHp: 300,
                 width: 60,
                 height: 60,
                 color: '#388E3C',
-                provides: 'infantry'
+                provides: 'infantry',
+                visionRadius: 200
             },
             factory: {
                 maxHp: 400,
                 width: 70,
                 height: 70,
                 color: '#F57C00',
-                provides: 'vehicles'
+                provides: 'vehicles',
+                visionRadius: 200
             },
             power: {
                 maxHp: 200,
                 width: 50,
                 height: 50,
                 color: '#FBC02D',
-                provides: 'power'
+                provides: 'power',
+                visionRadius: 160
             },
             refinery: {
                 maxHp: 350,
                 width: 65,
                 height: 65,
                 color: '#7B1FA2',
-                provides: 'credits'
+                provides: 'credits',
+                visionRadius: 160
             },
             sandbag: {
                 maxHp: 100,
                 width: 50,
                 height: 25,
                 color: '#8B7355',
-                provides: 'defense'
+                provides: 'defense',
+                visionRadius: 120
             },
             turret: {
                 maxHp: 150,
@@ -867,14 +913,16 @@ class Building {
                 provides: 'defense',
                 damage: 15,
                 range: 250,
-                attackSpeed: 1.5
+                attackSpeed: 1.5,
+                visionRadius: 280
             },
             missile_silo: {
                 maxHp: 250,
                 width: 70,
                 height: 70,
                 color: '#37474F',
-                provides: 'offense'
+                provides: 'offense',
+                visionRadius: 200
             }
         };
 
@@ -893,6 +941,11 @@ class Building {
             this.nukeCooldown = 0;
             this.maxNukeCooldown = 90;
         }
+
+        this.repairing = false;
+        this.garrison = [];
+        this.maxGarrison = this.type === 'sandbag' ? 2 : 4;
+        this.garrisonAttackCooldown = 0;
     }
 
     update(deltaTime, game) {
@@ -939,6 +992,42 @@ class Building {
         if (this.type === 'missile_silo') {
             if (this.nukeCooldown > 0) {
                 this.nukeCooldown = Math.max(0, this.nukeCooldown - deltaTime);
+            }
+        }
+
+        // Repair over time: 15 HP/sec, costs 3 credits/sec
+        if (this.repairing && this.team === game.playerTeam) {
+            const repairRate = 15;   // HP per second
+            const creditRate = 3;    // credits per second
+            const cost = creditRate * deltaTime;
+            if (this.hp >= this.maxHp) {
+                this.repairing = false;
+                game.updateUI();
+            } else if (game.resources.credits >= cost) {
+                game.resources.credits -= cost;
+                this.hp = Math.min(this.maxHp, this.hp + repairRate * deltaTime);
+            } else {
+                this.repairing = false; // ran out of money
+                game.updateUI();
+            }
+        }
+
+        // Garrison combat
+        if (this.garrison.length > 0) {
+            if (this.garrisonAttackCooldown > 0) this.garrisonAttackCooldown -= deltaTime;
+            if (this.garrisonAttackCooldown <= 0) {
+                const garrisonRange = 280;
+                const enemy = game.units.find(u => {
+                    if (u.team === this.team) return false;
+                    const dx = u.x - this.x, dy = u.y - this.y;
+                    return Math.sqrt(dx*dx+dy*dy) <= garrisonRange;
+                });
+                if (enemy) {
+                    const shooter = this.garrison[Math.floor(Math.random() * this.garrison.length)];
+                    const dmg = (shooter.damage || 5) * 1.5; // 50% bonus inside building
+                    game.projectiles.push(new Projectile(this.x, this.y, enemy, dmg, 450, 3, shooter.color || '#4CAF50', 'garrison_bullet', shooter));
+                    this.garrisonAttackCooldown = (shooter.attackSpeed || 1.0) / this.garrison.length;
+                }
             }
         }
     }
@@ -1342,6 +1431,15 @@ class Building {
 
         ctx.fillStyle = this.hp > this.maxHp * 0.3 ? '#4CAF50' : '#f44336';
         ctx.fillRect(barX, barY, barWidth * (this.hp / this.maxHp), barHeight);
+
+        if (this.garrison && this.garrison.length > 0) {
+            const cx = this.x - camera.x;
+            const cy = this.y - camera.y;
+            ctx.fillStyle = '#00E5FF';
+            ctx.font = `bold ${Math.round(this.width * 0.22)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.fillText(`G${this.garrison.length}`, cx, cy - this.height/2 - 14);
+        }
     }
 }
 
@@ -1365,6 +1463,7 @@ class InputHandler {
         this.cameraDragging = false;
         this.lastMouseX = 0;
         this.lastMouseY = 0;
+        this.mouseOnCanvas = false;
 
         this.hoveredEnemy = null; // Track which enemy is being hovered
         this.hoveredDeposit = null; // Track which ore deposit is being hovered
@@ -1376,6 +1475,8 @@ class InputHandler {
         this.canvas.addEventListener('mousedown', (e) => this.onMouseDown(e));
         this.canvas.addEventListener('mousemove', (e) => this.onMouseMove(e));
         this.canvas.addEventListener('mouseup', (e) => this.onMouseUp(e));
+        this.canvas.addEventListener('mouseenter', () => { this.mouseOnCanvas = true; });
+        this.canvas.addEventListener('mouseleave', () => { this.mouseOnCanvas = false; });
         this.canvas.addEventListener('contextmenu', (e) => {
             e.preventDefault();
             this.onRightClick(e);
@@ -1386,12 +1487,25 @@ class InputHandler {
         this.canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
         });
+
+        // Keep canvas pixel buffer in sync with its CSS display size
+        window.addEventListener('resize', () => this.game.resizeCanvas());
+        this.game.resizeCanvas();
+    }
+
+    // Convert a mouse event to game-unit coordinates
+    getCanvasPos(e) {
+        const rect = this.canvas.getBoundingClientRect();
+        return {
+            x: (e.clientX - rect.left) * (this.game.camera.width / rect.width),
+            y: (e.clientY - rect.top) * (this.game.camera.height / rect.height)
+        };
     }
 
     onMouseDown(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.mouseX = e.clientX - rect.left;
-        this.mouseY = e.clientY - rect.top;
+        const pos = this.getCanvasPos(e);
+        this.mouseX = pos.x;
+        this.mouseY = pos.y;
 
         if (e.button === 1) {
             this.cameraDragging = true;
@@ -1441,9 +1555,9 @@ class InputHandler {
     }
 
     onMouseMove(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        this.mouseX = e.clientX - rect.left;
-        this.mouseY = e.clientY - rect.top;
+        const pos = this.getCanvasPos(e);
+        this.mouseX = pos.x;
+        this.mouseY = pos.y;
 
         this.mouseWorldPos = {
             x: this.mouseX + this.game.camera.x,
@@ -1534,36 +1648,17 @@ class InputHandler {
             }
 
             // Set cursor based on what we're hovering
-            if (this.hoveredDeposit || this.hoveredEnemy) {
+            if (this.hoveredEnemy) {
                 this.canvas.style.cursor = 'crosshair';
+            } else if (this.hoveredDeposit) {
+                this.canvas.style.cursor = 'cell';
             } else {
-                this.canvas.style.cursor = 'pointer';
+                this.canvas.style.cursor = 'default';
             }
-        } else if (!this.game.buildMode && !this.game.commandMode) {
+        } else if (!this.game.buildMode && !this.game.commandMode && !this.game.nukeTargeting) {
             this.canvas.style.cursor = 'default';
         }
 
-        const scrollSpeed = 5;
-        const edgeSize = 50;
-
-        if (this.mouseX < edgeSize) {
-            this.game.camera.x = Math.max(0, this.game.camera.x - scrollSpeed);
-        }
-        if (this.mouseX > this.canvas.width - edgeSize) {
-            this.game.camera.x = Math.min(
-                this.game.worldWidth - this.game.camera.width,
-                this.game.camera.x + scrollSpeed
-            );
-        }
-        if (this.mouseY < edgeSize) {
-            this.game.camera.y = Math.max(0, this.game.camera.y - scrollSpeed);
-        }
-        if (this.mouseY > this.canvas.height - edgeSize) {
-            this.game.camera.y = Math.min(
-                this.game.worldHeight - this.game.camera.height,
-                this.game.camera.y + scrollSpeed
-            );
-        }
     }
 
     onMouseUp(e) {
@@ -1709,15 +1804,23 @@ class InputHandler {
     }
 
     onRightClick(e) {
-        const rect = this.canvas.getBoundingClientRect();
-        const mouseX = e.clientX - rect.left;
-        const mouseY = e.clientY - rect.top;
-        const worldX = mouseX + this.game.camera.x;
-        const worldY = mouseY + this.game.camera.y;
+        const pos = this.getCanvasPos(e);
+        const worldX = pos.x + this.game.camera.x;
+        const worldY = pos.y + this.game.camera.y;
 
-        if (this.game.buildMode) {
+        // Right-click cancels any active mode
+        if (this.game.buildMode || this.game.commandMode || this.game.nukeTargeting) {
             this.game.buildMode = null;
+            this.game.commandMode = null;
+            this.game.nukeTargeting = false;
             this.canvas.style.cursor = 'crosshair';
+            this.game.updateUI();
+            return;
+        }
+
+        // Right-click with a missile silo selected: fire at clicked location
+        if (this.game.selectedBuilding && this.game.selectedBuilding.type === 'missile_silo') {
+            this.game.launchNukeAt(worldX, worldY);
             return;
         }
 
@@ -1772,18 +1875,55 @@ class InputHandler {
         }
 
         if (this.game.selectedUnits.length > 0) {
-            this.game.selectedUnits.forEach(unit => {
-                if (clickedDeposit && unit.type === 'harvester') {
-                    // Harvester - target the ore deposit
-                    unit.targetDeposit = clickedDeposit;
-                    // Don't reset carrying - let harvester deposit first if full, then come back
-                } else if (clickedEnemy) {
-                    unit.target = clickedEnemy;
-                    unit.attackMove = false;
-                } else {
-                    unit.moveTo(worldX, worldY);
+            // Check if right-clicking a friendly building to garrison
+            const hasSoldiersSelected = this.game.selectedUnits.some(u => ['soldier','sniper','commando'].includes(u.type));
+            if (hasSoldiersSelected) {
+                for (const building of this.game.buildings) {
+                    if (building.team === this.game.playerTeam &&
+                        worldX >= building.x - building.width/2 && worldX <= building.x + building.width/2 &&
+                        worldY >= building.y - building.height/2 && worldY <= building.y + building.height/2) {
+                        // Garrison soldiers into this building
+                        const toGarrison = this.game.selectedUnits.filter(u => ['soldier','sniper','commando'].includes(u.type));
+                        const space = building.maxGarrison - building.garrison.length;
+                        toGarrison.slice(0, space).forEach(u => {
+                            u.garrisonedIn = building;
+                            u.selected = false;
+                            building.garrison.push(u);
+                        });
+                        this.game.selectedUnits = this.game.selectedUnits.filter(u => !u.garrisonedIn);
+                        this.game.updateUI();
+                        return;
+                    }
                 }
-            });
+            }
+            if (!clickedDeposit && !clickedEnemy) {
+                // Right-click on empty ground: issue move then deselect
+                this.game.selectedUnits.forEach(unit => unit.moveTo(worldX, worldY));
+                this.game.selectedUnits.forEach(unit => unit.selected = false);
+                this.game.selectedUnits = [];
+                if (this.game.selectedBuilding) {
+                    this.game.selectedBuilding.selected = false;
+                    this.game.selectedBuilding = null;
+                }
+                this.canvas.style.cursor = 'default';
+                this.game.updateUI();
+            } else {
+                this.game.selectedUnits.forEach(unit => {
+                    if (clickedDeposit && unit.type === 'harvester') {
+                        unit.targetDeposit = clickedDeposit;
+                    } else if (clickedEnemy) {
+                        unit.target = clickedEnemy;
+                        unit.attackMove = false;
+                    } else {
+                        unit.moveTo(worldX, worldY);
+                    }
+                });
+            }
+        } else if (this.game.selectedBuilding) {
+            // Right-click with a building selected deselects it
+            this.game.selectedBuilding.selected = false;
+            this.game.selectedBuilding = null;
+            this.game.updateUI();
         }
     }
 
@@ -2278,10 +2418,15 @@ class GameAI {
         if (myUnits.length < 3) return;
 
         const buildingPriority = { refinery: 4, barracks: 3, factory: 3, turret: 2, power: 2, hq: 1 };
-        const playerBuildings = this.game.buildings.filter(b => b.team === this.game.playerTeam);
-        const target = [...playerBuildings].sort((a, b) =>
-            (buildingPriority[b.type] || 0) - (buildingPriority[a.type] || 0)
-        )[0];
+        // Only attack buildings the AI has actually scouted (explored by enemy fog)
+        const playerBuildings = this.game.buildings.filter(b =>
+            b.team === this.game.playerTeam &&
+            this.game.isExploredByEnemy(b.x, b.y)
+        );
+        // Fall back to HQ if nothing explored yet (AI knows roughly where to go)
+        const target = playerBuildings.length > 0
+            ? [...playerBuildings].sort((a, b) => (buildingPriority[b.type] || 0) - (buildingPriority[a.type] || 0))[0]
+            : this.game.buildings.find(b => b.team === this.game.playerTeam && b.type === 'hq');
 
         if (!target) return;
 
@@ -2432,6 +2577,12 @@ const MISSIONS = [
     }
 ];
 
+const BUILD_PREREQS = {
+    factory: { requires: 'barracks', label: 'Barracks' },
+    turret:  { requires: 'barracks', label: 'Barracks' },
+    missile_silo: { requires: 'factory', label: 'War Factory' }
+};
+
 // ========== MAIN GAME ==========
 class Game {
     constructor() {
@@ -2444,11 +2595,12 @@ class Game {
         this.worldWidth = 3000;
         this.worldHeight = 2000;
 
+        // Fixed game-world viewport — independent of canvas pixel size
         this.camera = {
             x: 0,
             y: 0,
-            width: this.canvas.width,
-            height: this.canvas.height
+            width: 1200,
+            height: 700
         };
 
         this.units = [];
@@ -2488,7 +2640,17 @@ class Game {
         this.buildRadius = 200; // Buildings must be within 200 pixels of existing buildings
 
         this.resourceDeposits = [];
+
+        // Fog of war
+        this.fogTileSize = 48; // world units per fog tile
+        this.fogCols = Math.ceil(this.worldWidth / this.fogTileSize);
+        this.fogRows = Math.ceil(this.worldHeight / this.fogTileSize);
+        // 0 = unexplored (black), 1 = explored/shroud (dark), 2 = currently visible
+        this.playerFog = new Uint8Array(this.fogCols * this.fogRows);
+        this.enemyFog = new Uint8Array(this.fogCols * this.fogRows);
         this.initResourceDeposits();
+
+        this.resizeCanvas();
 
         this.input = new InputHandler(this);
         this.ai = new GameAI(this);
@@ -2539,6 +2701,8 @@ class Game {
             this.ai.missionConfig = mission.ai || null;
         }
 
+        this.resetFog();
+        this.updateFog(); // Reveal starting area immediately
         this.updateUI();
     }
 
@@ -2546,38 +2710,56 @@ class Game {
         // Spread gold deposits throughout the map
         this.resourceDeposits = [
             // Near player base
-            { x: 400, y: 300, amount: 6000 },
-            { x: 500, y: 500, amount: 5000 },
-            { x: 300, y: 600, amount: 4500 },
+            { x: 400, y: 300, amount: 6000, maxAmount: 6000 },
+            { x: 500, y: 500, amount: 5000, maxAmount: 5000 },
+            { x: 300, y: 600, amount: 4500, maxAmount: 4500 },
 
             // Near enemy base
-            { x: 2300, y: 1300, amount: 6000 },
-            { x: 2400, y: 1600, amount: 5000 },
-            { x: 2700, y: 1400, amount: 4500 },
+            { x: 2300, y: 1300, amount: 6000, maxAmount: 6000 },
+            { x: 2400, y: 1600, amount: 5000, maxAmount: 5000 },
+            { x: 2700, y: 1400, amount: 4500, maxAmount: 4500 },
 
             // Center of map (contested) - around the lake
-            { x: 1100, y: 950, amount: 8000 },  // West of lake
-            { x: 1500, y: 600, amount: 7000 },  // North of lake
-            { x: 1850, y: 950, amount: 7000 },  // East of lake
+            { x: 1100, y: 950, amount: 8000, maxAmount: 8000 },  // West of lake
+            { x: 1500, y: 600, amount: 7000, maxAmount: 7000 },  // North of lake
+            { x: 1850, y: 950, amount: 7000, maxAmount: 7000 },  // East of lake
 
             // Left side
-            { x: 600, y: 1000, amount: 5500 },
-            { x: 800, y: 1500, amount: 5000 },
-            { x: 400, y: 1200, amount: 4500 },
+            { x: 600, y: 1000, amount: 5500, maxAmount: 5500 },
+            { x: 800, y: 1500, amount: 5000, maxAmount: 5000 },
+            { x: 400, y: 1200, amount: 4500, maxAmount: 4500 },
 
             // Right side
-            { x: 2200, y: 800, amount: 5500 },
-            { x: 2600, y: 600, amount: 5000 },
-            { x: 2400, y: 400, amount: 4500 },
+            { x: 2200, y: 800, amount: 5500, maxAmount: 5500 },
+            { x: 2600, y: 600, amount: 5000, maxAmount: 5000 },
+            { x: 2400, y: 400, amount: 4500, maxAmount: 4500 },
 
             // Top area
-            { x: 1200, y: 400, amount: 5000 },
-            { x: 1800, y: 300, amount: 5000 },
+            { x: 1200, y: 400, amount: 5000, maxAmount: 5000 },
+            { x: 1800, y: 300, amount: 5000, maxAmount: 5000 },
 
             // Bottom area
-            { x: 1000, y: 1700, amount: 5000 },
-            { x: 1800, y: 1800, amount: 5000 }
+            { x: 1000, y: 1700, amount: 5000, maxAmount: 5000 },
+            { x: 1800, y: 1800, amount: 5000, maxAmount: 5000 }
         ];
+    }
+
+    resizeCanvas() {
+        const rect = this.canvas.getBoundingClientRect();
+        if (rect.width > 0 && rect.height > 0) {
+            this.canvas.width = Math.floor(rect.width);
+            this.canvas.height = Math.floor(rect.height);
+            // Keep camera height fixed; adjust width to match canvas aspect ratio
+            // so ctx.scale() uses the same factor on both axes (no stretching)
+            const baseHeight = 700;
+            this.camera.height = baseHeight;
+            this.camera.width = Math.round(baseHeight * (rect.width / rect.height));
+        }
+        const mmRect = this.minimapCanvas.getBoundingClientRect();
+        if (mmRect.width > 0 && mmRect.height > 0) {
+            this.minimapCanvas.width = Math.floor(mmRect.width);
+            this.minimapCanvas.height = Math.floor(mmRect.height);
+        }
     }
 
     setupEventListeners() {
@@ -2615,6 +2797,37 @@ class Game {
             nukeBtn.addEventListener('click', () => this.launchNuke());
         }
 
+        // Repair button
+        const repairBtn = document.getElementById('repair-btn');
+        if (repairBtn) {
+            repairBtn.addEventListener('click', () => {
+                const b = this.selectedBuilding;
+                if (!b || b.team !== this.playerTeam) return;
+                if (b.hp >= b.maxHp) return;
+                b.repairing = !b.repairing;
+                this.updateUI();
+            });
+        }
+
+        const evacuateBtn = document.getElementById('evacuate-btn');
+        if (evacuateBtn) {
+            evacuateBtn.addEventListener('click', () => {
+                const b = this.selectedBuilding;
+                if (!b || !b.garrison) return;
+                // Place evacuated units near the building
+                b.garrison.forEach((u, i) => {
+                    const angle = (i / b.garrison.length) * Math.PI * 2;
+                    u.x = b.x + Math.cos(angle) * (b.width/2 + 20);
+                    u.y = b.y + Math.sin(angle) * (b.height/2 + 20);
+                    u.targetX = u.x;
+                    u.targetY = u.y;
+                    u.garrisonedIn = null;
+                });
+                b.garrison = [];
+                this.updateUI();
+            });
+        }
+
         // Campaign button
         const campaignBtn = document.getElementById('campaign-btn');
         if (campaignBtn) {
@@ -2645,6 +2858,16 @@ class Game {
     }
 
     enterBuildMode(type, cost) {
+        const prereq = BUILD_PREREQS[type];
+        if (prereq && !this.buildings.some(b => b.team === this.playerTeam && b.type === prereq.requires)) {
+            const info = document.getElementById('selected-info');
+            if (info) {
+                info.textContent = `⚠️ Requires ${prereq.label} first`;
+                info.style.color = '#f44336';
+                setTimeout(() => { info.textContent = ''; info.style.color = '#aaa'; }, 2500);
+            }
+            return;
+        }
         if (this.resources.credits >= cost) {
             this.buildMode = type;
             this.buildCost = cost;
@@ -2655,17 +2878,15 @@ class Game {
     placeBuilding(x, y) {
         if (this.buildMode && this.resources.credits >= this.buildCost) {
             // Check if position doesn't overlap with existing buildings
-            if (!this.isValidBuildLocation(x, y)) {
-                // Show error message
+            const buildError = this.getBuildError(x, y);
+            if (buildError) {
                 const infoElement = document.getElementById('selected-info');
-                const originalText = infoElement.textContent;
-                infoElement.textContent = '⚠️ Cannot build on top of existing buildings!';
+                infoElement.textContent = `⚠️ ${buildError}`;
                 infoElement.style.color = '#f44336';
-
                 setTimeout(() => {
-                    infoElement.textContent = originalText;
+                    infoElement.textContent = '';
                     infoElement.style.color = '#aaa';
-                }, 2000);
+                }, 2500);
                 return;
             }
 
@@ -2690,23 +2911,60 @@ class Game {
         }
     }
 
-    isValidBuildLocation(x, y) {
-        // Check if the new building would overlap with any existing buildings
-        const newBuildingSize = 60; // Approximate building size
-
+    getBuildError(x, y) {
+        const newBuildingSize = 60;
         for (const building of this.buildings) {
             const dx = Math.abs(x - building.x);
             const dy = Math.abs(y - building.y);
-
-            // Check if buildings would overlap (with small buffer)
             const minDistance = (newBuildingSize + Math.max(building.width, building.height)) / 2 + 10;
+            if (dx < minDistance && dy < minDistance) return 'Too close to an existing building!';
+        }
+        const playerBuildings = this.buildings.filter(b => b.team === this.playerTeam);
+        const nearFriendly = playerBuildings.some(b => {
+            const dx = x - b.x, dy = y - b.y;
+            return Math.sqrt(dx * dx + dy * dy) <= this.buildRadius;
+        });
+        if (!nearFriendly) return 'Must build within range of your base!';
+        const tooCloseToEnemy = this.buildings.some(b => {
+            if (b.team === this.playerTeam) return false;
+            const dx = x - b.x, dy = y - b.y;
+            return Math.sqrt(dx * dx + dy * dy) < 350;
+        });
+        if (tooCloseToEnemy) return 'Too close to enemy territory!';
+        return null;
+    }
 
-            if (dx < minDistance && dy < minDistance) {
-                return false; // Buildings would overlap
-            }
+    isValidBuildLocation(x, y, team) {
+        const newBuildingSize = 60;
+
+        // Check overlap with any existing building
+        for (const building of this.buildings) {
+            const dx = Math.abs(x - building.x);
+            const dy = Math.abs(y - building.y);
+            const minDistance = (newBuildingSize + Math.max(building.width, building.height)) / 2 + 10;
+            if (dx < minDistance && dy < minDistance) return false;
         }
 
-        return true; // Location is clear
+        // Player-only proximity rules
+        if (!team || team === this.playerTeam) {
+            // Must be within buildRadius of at least one friendly building
+            const playerBuildings = this.buildings.filter(b => b.team === this.playerTeam);
+            const nearFriendly = playerBuildings.some(b => {
+                const dx = x - b.x, dy = y - b.y;
+                return Math.sqrt(dx * dx + dy * dy) <= this.buildRadius;
+            });
+            if (!nearFriendly) return false;
+
+            // Cannot build within 350px of any enemy building
+            const tooCloseToEnemy = this.buildings.some(b => {
+                if (b.team === this.playerTeam) return false;
+                const dx = x - b.x, dy = y - b.y;
+                return Math.sqrt(dx * dx + dy * dy) < 350;
+            });
+            if (tooCloseToEnemy) return false;
+        }
+
+        return true;
     }
 
     findSpawnPosition(building, unitSize) {
@@ -2976,6 +3234,10 @@ class Game {
         this.buildings.forEach(building => {
             if (building.hp <= 0) {
                 this.createExplosion(building.x, building.y, building.width, building.color);
+                if (building.garrison && building.garrison.length > 0) {
+                    building.garrison.forEach(u => { u.hp = 0; u.garrisonedIn = null; });
+                    building.garrison = [];
+                }
             }
         });
 
@@ -2989,9 +3251,197 @@ class Game {
         this.nukes = this.nukes.filter(n => !n.dead);
         this.shockwaves = this.shockwaves.filter(s => s.life > 0);
 
+        // Deposits regenerate slowly over time
+        this.resourceDeposits.forEach(d => {
+            if (d.amount < d.maxAmount) d.amount = Math.min(d.maxAmount, d.amount + 8 * deltaTime);
+        });
+
+        // Edge scrolling — runs every frame so the camera moves continuously
+        if (!this.input.cameraDragging && this.input.mouseOnCanvas) {
+            const edgeSize = 50;
+            const maxSpeed = 800; // world-units per second at full edge depth
+            const mx = this.input.mouseX;
+            const my = this.input.mouseY;
+            if (!document.hidden) {
+                if (mx < edgeSize) {
+                    this.camera.x -= maxSpeed * ((edgeSize - mx) / edgeSize) * deltaTime;
+                }
+                if (mx > this.camera.width - edgeSize) {
+                    this.camera.x += maxSpeed * ((mx - (this.camera.width - edgeSize)) / edgeSize) * deltaTime;
+                }
+                if (my < edgeSize) {
+                    this.camera.y -= maxSpeed * ((edgeSize - my) / edgeSize) * deltaTime;
+                }
+                if (my > this.camera.height - edgeSize) {
+                    this.camera.y += maxSpeed * ((my - (this.camera.height - edgeSize)) / edgeSize) * deltaTime;
+                }
+                this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
+                this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
+            }
+        }
+
+        this.updateFog();
         this.updatePower();
+        this.updateNukeUI();
+        this.updateRepairUI();
         this.checkGameEnd();
     }
+
+    updateNukeUI() {
+        const nukeBtn = document.getElementById('launch-nuke-btn');
+        if (!nukeBtn) return;
+        const silo = this.buildings.find(b => b.team === this.playerTeam && b.type === 'missile_silo');
+        if (!silo) {
+            nukeBtn.style.display = 'none';
+            return;
+        }
+        nukeBtn.style.display = 'inline-block';
+        const ready = silo.nukeCooldown <= 0;
+        const canAfford = this.resources.credits >= this.nukeCost;
+        nukeBtn.disabled = !ready || !canAfford;
+        nukeBtn.style.opacity = (ready && canAfford) ? '1' : '0.5';
+        nukeBtn.textContent = ready ? `☢ Launch Nuke (${this.nukeCost})` : `☢ Recharging ${Math.ceil(silo.nukeCooldown)}s`;
+
+        // Live-update info bar if silo is currently selected
+        if (this.selectedBuilding === silo) {
+            const infoEl = document.getElementById('selected-info');
+            if (infoEl && !this.nukeTargeting) {
+                const canAfford = this.resources.credits >= this.nukeCost;
+                infoEl.textContent = ready && canAfford
+                    ? `☢ Missile Silo ready — Right-click map to fire (costs ${this.nukeCost} credits)`
+                    : !ready
+                        ? `☢ Missile Silo recharging — ${Math.ceil(silo.nukeCooldown)}s remaining`
+                        : `☢ Missile Silo ready — need ${this.nukeCost} credits to fire`;
+            }
+        }
+
+    }
+
+    updateRepairUI() {
+        const repairBtn = document.getElementById('repair-btn');
+        if (!repairBtn) return;
+        const b = this.selectedBuilding;
+
+        if (!b || b.team !== this.playerTeam) {
+            repairBtn.style.display = 'none';
+            const evacuateBtn = document.getElementById('evacuate-btn');
+            if (evacuateBtn) evacuateBtn.style.display = 'none';
+            return;
+        }
+
+        repairBtn.style.display = 'block';
+        const damaged = b.hp < b.maxHp;
+        const hpPct = Math.round((b.hp / b.maxHp) * 100);
+
+        if (!damaged) {
+            repairBtn.textContent = `🔧 Repair (Full HP)`;
+            repairBtn.style.background = '#444';
+            repairBtn.disabled = true;
+        } else if (b.repairing) {
+            repairBtn.textContent = `⏹ Stop Repair (${hpPct}% HP)`;
+            repairBtn.style.background = '#B71C1C';
+            repairBtn.disabled = false;
+        } else {
+            repairBtn.textContent = `🔧 Repair Building (3 credits/sec)`;
+            repairBtn.style.background = '#1B5E20';
+            repairBtn.disabled = this.resources.credits < 1;
+        }
+
+        const evacuateBtn = document.getElementById('evacuate-btn');
+        if (evacuateBtn) {
+            const showEvac = b && b.team === this.playerTeam && b.garrison && b.garrison.length > 0;
+            evacuateBtn.style.display = showEvac ? 'block' : 'none';
+            if (showEvac) evacuateBtn.textContent = `🚪 Evacuate (${b.garrison.length} inside)`;
+        }
+    }
+
+    // ---- FOG OF WAR ----
+
+    resetFog() {
+        this.playerFog.fill(0);
+        this.enemyFog.fill(0);
+    }
+
+    markFogVisible(cx, cy, radius, grid) {
+        const ts = this.fogTileSize;
+        const minTX = Math.max(0, Math.floor((cx - radius) / ts));
+        const maxTX = Math.min(this.fogCols - 1, Math.floor((cx + radius) / ts));
+        const minTY = Math.max(0, Math.floor((cy - radius) / ts));
+        const maxTY = Math.min(this.fogRows - 1, Math.floor((cy + radius) / ts));
+        const r2 = radius * radius;
+        for (let ty = minTY; ty <= maxTY; ty++) {
+            for (let tx = minTX; tx <= maxTX; tx++) {
+                const dx = (tx + 0.5) * ts - cx;
+                const dy = (ty + 0.5) * ts - cy;
+                if (dx * dx + dy * dy <= r2) {
+                    grid[ty * this.fogCols + tx] = 2;
+                }
+            }
+        }
+    }
+
+    updateFog() {
+        // Step 1: decay visible → explored (shroud) for both teams
+        for (let i = 0; i < this.playerFog.length; i++) {
+            if (this.playerFog[i] === 2) this.playerFog[i] = 1;
+            if (this.enemyFog[i] === 2) this.enemyFog[i] = 1;
+        }
+        // Step 2: re-mark currently visible tiles
+        this.units.forEach(u => {
+            const grid = u.team === this.playerTeam ? this.playerFog : this.enemyFog;
+            this.markFogVisible(u.x, u.y, u.visionRadius || 200, grid);
+        });
+        this.buildings.forEach(b => {
+            const grid = b.team === this.playerTeam ? this.playerFog : this.enemyFog;
+            this.markFogVisible(b.x, b.y, b.visionRadius || 160, grid);
+        });
+    }
+
+    fogStateAt(worldX, worldY, grid) {
+        const tx = Math.floor(worldX / this.fogTileSize);
+        const ty = Math.floor(worldY / this.fogTileSize);
+        if (tx < 0 || tx >= this.fogCols || ty < 0 || ty >= this.fogRows) return 0;
+        return grid[ty * this.fogCols + tx];
+    }
+
+    isVisibleToPlayer(worldX, worldY) {
+        return this.fogStateAt(worldX, worldY, this.playerFog) === 2;
+    }
+
+    isExploredByPlayer(worldX, worldY) {
+        return this.fogStateAt(worldX, worldY, this.playerFog) >= 1;
+    }
+
+    isVisibleToEnemy(worldX, worldY) {
+        return this.fogStateAt(worldX, worldY, this.enemyFog) === 2;
+    }
+
+    isExploredByEnemy(worldX, worldY) {
+        return this.fogStateAt(worldX, worldY, this.enemyFog) >= 1;
+    }
+
+    renderFog() {
+        const ts = this.fogTileSize;
+        const cam = this.camera;
+        const ctx = this.ctx;
+
+        const startTX = Math.max(0, Math.floor(cam.x / ts));
+        const endTX   = Math.min(this.fogCols - 1, Math.ceil((cam.x + cam.width)  / ts));
+        const startTY = Math.max(0, Math.floor(cam.y / ts));
+        const endTY   = Math.min(this.fogRows - 1, Math.ceil((cam.y + cam.height) / ts));
+
+        for (let ty = startTY; ty <= endTY; ty++) {
+            for (let tx = startTX; tx <= endTX; tx++) {
+                if (this.playerFog[ty * this.fogCols + tx] !== 0) continue; // explored = permanently clear
+                const sx = tx * ts - cam.x;
+                const sy = ty * ts - cam.y;
+                ctx.fillStyle = '#000000';
+                ctx.fillRect(sx, sy, ts + 1, ts + 1);
+            }
+        }
+    }
+
+    // ---- END FOG OF WAR ----
 
     checkGameEnd() {
         const playerHQ = this.buildings.find(b => b.team === this.playerTeam && b.type === 'hq');
@@ -3120,19 +3570,19 @@ class Game {
             const isUnlocked = i === 0 || completed.includes(MISSIONS[i - 1].id);
             const isDone = completed.includes(m.id);
             const dColor = diffColors[m.difficulty] || '#fff';
-            return `<div onclick="window._game.startMission(${m.id})" style="background:${isUnlocked ? '#1e1e1e' : '#111'};border:2px solid ${isUnlocked ? dColor : '#333'};border-radius:8px;padding:18px 22px;margin:6px;cursor:${isUnlocked ? 'pointer' : 'default'};opacity:${isUnlocked ? 1 : 0.45};min-width:220px;transition:all 0.2s;" onmouseover="if(${isUnlocked})this.style.background='#2a2a2a'" onmouseout="this.style.background='${isUnlocked ? '#1e1e1e' : '#111'}'">
-                <div style="color:${dColor};font-weight:bold;font-size:13px;letter-spacing:1px;">${m.difficulty} ${isDone ? '✓' : ''}</div>
-                <div style="color:#fff;font-size:18px;font-weight:bold;margin:4px 0;">${m.id}. ${m.name}</div>
-                <div style="color:#aaa;font-size:12px;">${isUnlocked ? m.description : '🔒 Complete previous mission to unlock'}</div>
+            return `<div onclick="window._game.startMission(${m.id})" style="background:${isUnlocked ? '#1e1e1e' : '#111'};border:2px solid ${isUnlocked ? dColor : '#333'};border-radius:8px;padding:clamp(12px,2vh,24px) clamp(14px,2vw,28px);margin:clamp(4px,0.6vmin,10px);cursor:${isUnlocked ? 'pointer' : 'default'};opacity:${isUnlocked ? 1 : 0.45};min-width:clamp(180px,18vw,300px);max-width:clamp(200px,22vw,340px);flex:1;transition:all 0.2s;" onmouseover="if(${isUnlocked})this.style.background='#2a2a2a'" onmouseout="this.style.background='${isUnlocked ? '#1e1e1e' : '#111'}'">
+                <div style="color:${dColor};font-weight:bold;font-size:clamp(11px,1.4vmin,18px);letter-spacing:1px;">${m.difficulty} ${isDone ? '✓' : ''}</div>
+                <div style="color:#fff;font-size:clamp(15px,2vmin,26px);font-weight:bold;margin:clamp(3px,0.5vmin,8px) 0;">${m.id}. ${m.name}</div>
+                <div style="color:#aaa;font-size:clamp(10px,1.2vmin,16px);">${isUnlocked ? m.description : '🔒 Complete previous mission to unlock'}</div>
             </div>`;
         }).join('');
 
         overlay.innerHTML = `
-            <div style="text-align:center;max-width:700px;width:90%;">
-                <h1 style="color:#FF5722;font-size:42px;margin:0 0 8px;text-shadow:0 0 16px #FF5722;">TITAN WAR</h1>
-                <p style="color:#888;font-size:14px;margin:0 0 28px;letter-spacing:2px;">CAMPAIGN</p>
+            <div style="text-align:center;max-width:min(900px,90vw);width:90%;">
+                <h1 style="color:#FF5722;font-size:clamp(32px,6vmin,80px);margin:0 0 clamp(4px,0.8vmin,12px);text-shadow:0 0 16px #FF5722;">TITAN WAR</h1>
+                <p style="color:#888;font-size:clamp(11px,1.5vmin,20px);margin:0 0 clamp(16px,3vmin,40px);letter-spacing:2px;">CAMPAIGN</p>
                 <div style="display:flex;flex-wrap:wrap;justify-content:center;">${missionCards}</div>
-                <button onclick="document.getElementById('campaign-overlay').remove();window._game.startMission(1)" style="margin-top:24px;background:#263238;color:#aaa;border:1px solid #444;padding:10px 24px;font-size:14px;border-radius:4px;cursor:pointer;">Quick Start (Mission 1)</button>
+                <button onclick="document.getElementById('campaign-overlay').remove();window._game.startMission(1)" style="margin-top:clamp(14px,2.5vmin,32px);background:#263238;color:#aaa;border:1px solid #444;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">Quick Start (Mission 1)</button>
             </div>`;
 
         document.body.appendChild(overlay);
@@ -3300,30 +3750,34 @@ class Game {
     }
 
     render() {
-        // Draw ground with varied grass color
-        this.ctx.fillStyle = '#3a6b1f';
-        this.ctx.fillRect(0, 0, this.canvas.width, this.canvas.height);
+        // Scale so the fixed 1200x700 game viewport always fills the canvas
+        const sx = this.canvas.width / this.camera.width;
+        const sy = this.canvas.height / this.camera.height;
+        this.ctx.save();
+        this.ctx.scale(sx, sy);
 
-        // Add some texture variation to the ground
+        // Draw ground
+        this.ctx.fillStyle = '#3a6b1f';
+        this.ctx.fillRect(0, 0, this.camera.width, this.camera.height);
+
+        // Grass texture variation
         for (let i = 0; i < 50; i++) {
-            const x = Math.random() * this.canvas.width;
-            const y = Math.random() * this.canvas.height;
+            const x = Math.random() * this.camera.width;
+            const y = Math.random() * this.camera.height;
             this.ctx.fillStyle = 'rgba(50, 90, 30, 0.1)';
             this.ctx.fillRect(x, y, 40, 40);
         }
 
-        // Grid removed for more natural look
-        // this.drawGrid();
-
         // Viewport culling - only render visible entities
-        const buffer = 100; // Extra buffer to avoid pop-in
+        const buffer = 100;
 
         this.resourceDeposits.forEach(deposit => {
             if (deposit.amount > 0 &&
                 deposit.x > this.camera.x - buffer &&
                 deposit.x < this.camera.x + this.camera.width + buffer &&
                 deposit.y > this.camera.y - buffer &&
-                deposit.y < this.camera.y + this.camera.height + buffer) {
+                deposit.y < this.camera.y + this.camera.height + buffer &&
+                this.isExploredByPlayer(deposit.x, deposit.y)) {
                 this.drawResourceDeposit(deposit);
             }
         });
@@ -3333,6 +3787,10 @@ class Game {
                 building.x < this.camera.x + this.camera.width + buffer &&
                 building.y > this.camera.y - buffer &&
                 building.y < this.camera.y + this.camera.height + buffer) {
+                // Enemy buildings: only draw if the area has been explored
+                if (building.team !== this.playerTeam && !this.isExploredByPlayer(building.x, building.y)) {
+                    return;
+                }
                 building.render(this.ctx, this.camera);
             }
         });
@@ -3342,6 +3800,8 @@ class Game {
                 unit.x < this.camera.x + this.camera.width + buffer &&
                 unit.y > this.camera.y - buffer &&
                 unit.y < this.camera.y + this.camera.height + buffer) {
+                // Enemy units: only draw when currently visible
+                if (unit.team !== this.playerTeam && !this.isVisibleToPlayer(unit.x, unit.y)) return;
                 unit.render(this.ctx, this.camera);
             }
         });
@@ -3386,11 +3846,15 @@ class Game {
             this.ctx.stroke();
         }
 
+        this.renderFog();
+
         this.input.renderSelection(this.ctx, this.camera);
 
         if (this.buildMode) {
             this.drawBuildPreview();
         }
+
+        this.ctx.restore(); // End viewport scale
 
         this.renderMinimap();
     }
@@ -3408,42 +3872,46 @@ class Game {
         const scaleX = width / this.worldWidth;
         const scaleY = height / this.worldHeight;
 
-        // Draw resource deposits
+        // Draw resource deposits (only if explored)
         ctx.fillStyle = '#FFD700';
         this.resourceDeposits.forEach(deposit => {
-            if (deposit.amount > 0) {
+            if (deposit.amount > 0 && this.isExploredByPlayer(deposit.x, deposit.y)) {
                 const x = deposit.x * scaleX;
                 const y = deposit.y * scaleY;
                 ctx.fillRect(x - 1, y - 1, 3, 3);
             }
         });
 
-        // Draw buildings
+        // Draw buildings (fog-aware)
         this.buildings.forEach(building => {
-            if (building.team === this.playerTeam) {
-                ctx.fillStyle = '#00ff00';
-            } else {
-                ctx.fillStyle = '#ff0000';
-            }
-
+            if (building.team !== this.playerTeam && !this.isExploredByPlayer(building.x, building.y)) return;
+            ctx.fillStyle = building.team === this.playerTeam ? '#00ff00' : '#ff0000';
             const x = building.x * scaleX;
             const y = building.y * scaleY;
-            const size = 4;
-            ctx.fillRect(x - size/2, y - size/2, size, size);
+            ctx.fillRect(x - 2, y - 2, 4, 4);
         });
 
-        // Draw units (smaller)
+        // Draw units (fog-aware — enemy only shown when currently visible)
         this.units.forEach(unit => {
-            if (unit.team === this.playerTeam) {
-                ctx.fillStyle = '#88ff88';
-            } else {
-                ctx.fillStyle = '#ff8888';
-            }
-
+            if (unit.team !== this.playerTeam && !this.isVisibleToPlayer(unit.x, unit.y)) return;
+            ctx.fillStyle = unit.team === this.playerTeam ? '#88ff88' : '#ff8888';
             const x = unit.x * scaleX;
             const y = unit.y * scaleY;
             ctx.fillRect(x - 1, y - 1, 2, 2);
         });
+
+        // Fog overlay on minimap — only unexplored tiles are darkened
+        const ts = this.fogTileSize;
+        ctx.fillStyle = 'rgba(0,0,0,0.82)';
+        for (let ty = 0; ty < this.fogRows; ty++) {
+            for (let tx = 0; tx < this.fogCols; tx++) {
+                if (this.playerFog[ty * this.fogCols + tx] !== 0) continue;
+                ctx.fillRect(
+                    tx * ts * scaleX, ty * ts * scaleY,
+                    ts * scaleX + 1, ts * scaleY + 1
+                );
+            }
+        }
 
         // Draw camera viewport
         ctx.strokeStyle = '#ffffff';
@@ -3537,22 +4005,35 @@ class Game {
             this.ctx.arc(x - 2, y - 2, nugget.size * 0.3, 0, Math.PI * 2);
             this.ctx.fill();
         });
+
+        if (deposit.amount < deposit.maxAmount * 0.3) {
+            this.ctx.strokeStyle = 'rgba(255,215,0,0.4)';
+            this.ctx.lineWidth = 2;
+            this.ctx.setLineDash([4,4]);
+            this.ctx.beginPath();
+            this.ctx.arc(screenX, screenY, 28, 0, Math.PI*2);
+            this.ctx.stroke();
+            this.ctx.setLineDash([]);
+        }
     }
 
     drawBuildPreview() {
-        // Draw build radius circles around player buildings
-        const playerBuildings = this.buildings.filter(b => b.team === this.playerTeam);
-
-        this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.2)';
-        this.ctx.lineWidth = 2;
         this.ctx.setLineDash([5, 5]);
+        this.ctx.lineWidth = 2;
 
-        playerBuildings.forEach(building => {
-            const screenX = building.x - this.camera.x;
-            const screenY = building.y - this.camera.y;
-
+        // Green build-radius rings around friendly buildings
+        this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.25)';
+        this.buildings.filter(b => b.team === this.playerTeam).forEach(b => {
             this.ctx.beginPath();
-            this.ctx.arc(screenX, screenY, this.buildRadius, 0, Math.PI * 2);
+            this.ctx.arc(b.x - this.camera.x, b.y - this.camera.y, this.buildRadius, 0, Math.PI * 2);
+            this.ctx.stroke();
+        });
+
+        // Red exclusion rings around enemy buildings
+        this.ctx.strokeStyle = 'rgba(255, 50, 50, 0.3)';
+        this.buildings.filter(b => b.team !== this.playerTeam).forEach(b => {
+            this.ctx.beginPath();
+            this.ctx.arc(b.x - this.camera.x, b.y - this.camera.y, 350, 0, Math.PI * 2);
             this.ctx.stroke();
         });
 
@@ -3588,16 +4069,35 @@ class Game {
             `${this.resources.power}/${this.resources.maxPower}`;
 
         let info = '';
-        if (this.commandMode === 'move') {
-            info = `${this.selectedUnits.length} unit(s) - Click where to MOVE`;
+        if (this.nukeTargeting) {
+            info = '☢ Click target location for nuclear strike — Escape or Right-click to cancel';
+        } else if (this.commandMode === 'move') {
+            info = `${this.selectedUnits.length} unit(s) — Click where to MOVE`;
         } else if (this.commandMode === 'attack') {
-            info = `${this.selectedUnits.length} unit(s) - Click where to ATTACK`;
+            info = `${this.selectedUnits.length} unit(s) — Click where to ATTACK`;
         } else if (this.selectedUnits.length > 0) {
-            info = `${this.selectedUnits.length} unit(s) selected - Press M to move, A to attack, or Right-click`;
+            info = `${this.selectedUnits.length} unit(s) selected — M: move  A: attack  Right-click: move+deselect`;
+        } else if (this.selectedBuilding && this.selectedBuilding.type === 'missile_silo') {
+            const silo = this.selectedBuilding;
+            const ready = silo.nukeCooldown <= 0;
+            const canAfford = this.resources.credits >= this.nukeCost;
+            if (ready && canAfford) {
+                info = `☢ Missile Silo ready — Right-click map to fire (costs ${this.nukeCost} credits)`;
+            } else if (!ready) {
+                info = `☢ Missile Silo recharging — ${Math.ceil(silo.nukeCooldown)}s remaining`;
+            } else {
+                info = `☢ Missile Silo ready — need ${this.nukeCost} credits to fire`;
+            }
         } else if (this.selectedBuilding) {
-            info = `${this.selectedBuilding.type} - HP: ${this.selectedBuilding.hp}`;
+            const b = this.selectedBuilding;
+            const hpPct = Math.round((b.hp / b.maxHp) * 100);
+            if (b.repairing) {
+                info = `🔧 Repairing ${b.type} — ${Math.ceil(b.hp)}/${b.maxHp} HP (${hpPct}%) — 3 credits/sec`;
+            } else {
+                info = `${b.type} — ${Math.ceil(b.hp)}/${b.maxHp} HP (${hpPct}%)`;
+            }
         } else {
-            info = 'Left-click to select units | Right-click to command';
+            info = 'Left-click to select  |  Right-click to move+deselect  |  Drag to box-select';
         }
         document.getElementById('selected-info').textContent = info;
 
@@ -3647,22 +4147,19 @@ class Game {
             }
         });
 
-        // Show/hide nuke button based on missile silo
-        const nukeBtn = document.getElementById('launch-nuke-btn');
-        if (nukeBtn) {
-            const silo = this.buildings.find(b => b.team === this.playerTeam && b.type === 'missile_silo');
-            if (silo) {
-                nukeBtn.style.display = 'inline-block';
-                const ready = silo.nukeCooldown <= 0;
-                nukeBtn.disabled = !ready || this.resources.credits < this.nukeCost;
-                nukeBtn.style.opacity = (ready && this.resources.credits >= this.nukeCost) ? '1' : '0.5';
-                nukeBtn.textContent = ready
-                    ? `☢ Launch Nuke (${this.nukeCost})`
-                    : `☢ Recharging... ${Math.ceil(silo.nukeCooldown)}s`;
-            } else {
-                nukeBtn.style.display = 'none';
-            }
-        }
+        document.querySelectorAll('.build-btn').forEach(btn => {
+            const type = btn.dataset.type;
+            const prereq = BUILD_PREREQS[type];
+            const cost = parseInt(btn.dataset.cost);
+            const hasPrereq = !prereq || this.buildings.some(b => b.team === this.playerTeam && b.type === prereq.requires);
+            const canAfford = this.resources.credits >= cost;
+            btn.disabled = !hasPrereq || !canAfford;
+            btn.style.opacity = (!hasPrereq || !canAfford) ? '0.5' : '1';
+            if (!btn.dataset.baseText) btn.dataset.baseText = btn.textContent.replace(/ \(Need.*\)$/, '').trim();
+            btn.textContent = !hasPrereq
+                ? `${btn.dataset.baseText} (Need ${prereq.label})`
+                : btn.dataset.baseText;
+        });
 
         // Update production queue display
         const queueElement = document.getElementById('production-queue');
@@ -3689,6 +4186,8 @@ class Game {
             });
             queueElement.innerHTML = queueHTML;
         }
+
+        this.updateRepairUI();
     }
 
     gameLoop(currentTime) {
