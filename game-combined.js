@@ -684,22 +684,28 @@ class Unit {
 
     findNearestDeposit(deposits) {
         let nearest = null;
+        let nearestEmpty = null;
         let minDist = Infinity;
+        let minEmptyDist = Infinity;
 
         deposits.forEach(deposit => {
+            const dx = deposit.x - this.x;
+            const dy = deposit.y - this.y;
+            const dist = Math.sqrt(dx * dx + dy * dy);
             if (deposit.amount > 0) {
-                const dx = deposit.x - this.x;
-                const dy = deposit.y - this.y;
-                const dist = Math.sqrt(dx * dx + dy * dy);
-
-                if (dist < minDist) {
-                    minDist = dist;
-                    nearest = deposit;
-                }
+                if (dist < minDist) { minDist = dist; nearest = deposit; }
+            } else {
+                if (dist < minEmptyDist) { minEmptyDist = dist; nearestEmpty = deposit; }
             }
         });
 
-        return nearest;
+        // If a manually assigned deposit exists, prefer it (even if empty — wait nearby)
+        if (this.targetDeposit) {
+            return this.targetDeposit.amount > 0 ? this.targetDeposit : (nearest || this.targetDeposit);
+        }
+
+        // Return nearest with ore, or nearest empty one so harvester waits there for regen
+        return nearest || nearestEmpty;
     }
 
     findNearbyEnemy(game) {
