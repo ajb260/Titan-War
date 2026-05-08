@@ -42,7 +42,7 @@ class Projectile {
         this.dead = false;
         this.owner = owner;
         this.game = game;
-        this.aoe = (type === 'mortar_shell') ? 70 : 0;
+        this.aoe = type === 'mortar_shell' ? 70 : type === 'rocket' ? 35 : 0;
         this.trailX = x;
         this.trailY = y;
     }
@@ -56,6 +56,15 @@ class Projectile {
         // Save trail position before moving
         this.trailX = this.x;
         this.trailY = this.y;
+
+        // Rocket smoke trail
+        if (this.type === 'rocket' && this.game) {
+            const grey = Math.floor(140 + Math.random() * 60);
+            const p = new Particle(this.x, this.y, `rgb(${grey},${grey},${grey})`,
+                2 + Math.random() * 2, (Math.random()-0.5)*0.3, -0.4 - Math.random()*0.3);
+            p.decay = 0.06;
+            this.game.particles.push(p);
+        }
 
         // Move toward target
         const dx = this.target.x - this.x;
@@ -94,7 +103,7 @@ class Projectile {
         const screenX = this.x - camera.x;
         const screenY = this.y - camera.y;
 
-        if (this.type === 'bullet' || this.type === 'shell' || this.type === 'artillery_shell') {
+        if (this.type === 'bullet' || this.type === 'shell' || this.type === 'artillery_shell' || this.type === 'rocket') {
             ctx.save();
             ctx.globalAlpha = 0.5;
             ctx.strokeStyle = this.color;
@@ -386,6 +395,18 @@ class Unit {
                 weight: 2,
                 canCrush: false,
                 visionRadius: 180
+            },
+            bazooka: {
+                maxHp: 60,
+                speed: 50,
+                damage: 90,
+                range: 190,
+                attackSpeed: 4.5,
+                size: 13,
+                color: '#795548',
+                weight: 1,
+                canCrush: false,
+                visionRadius: 200
             },
             medic: {
                 maxHp: 55,
@@ -775,6 +796,11 @@ class Unit {
             speed = 180;
             size = 7;
             color = '#FF6F00';
+        } else if (this.type === 'bazooka') {
+            projectileType = 'rocket';
+            speed = 220;
+            size = 5;
+            color = '#FF6F00';
         }
 
         return new Projectile(
@@ -965,6 +991,26 @@ class Unit {
             ctx.fillStyle = '#4CAF50';
             ctx.beginPath(); ctx.arc(screenX - this.size * 0.4, screenY - this.size * 0.2, this.size * 0.3, 0, Math.PI*2); ctx.fill();
             ctx.beginPath(); ctx.arc(screenX + this.size * 0.4, screenY - this.size * 0.2, this.size * 0.3, 0, Math.PI*2); ctx.fill();
+        } else if (this.type === 'bazooka') {
+            const bColor = this.team === 'player' ? this.color : '#ef5350';
+            ctx.fillStyle = bColor;
+            // Head
+            ctx.beginPath();
+            ctx.arc(screenX, screenY - this.size / 3, this.size / 3, 0, Math.PI * 2);
+            ctx.fill();
+            // Body
+            ctx.fillRect(screenX - this.size / 3, screenY - this.size / 6, this.size * 2 / 3, this.size * 2 / 3);
+            // Rocket tube on shoulder (horizontal, extending right)
+            ctx.fillStyle = '#37474F';
+            ctx.fillRect(screenX - this.size * 0.2, screenY - this.size * 0.35, this.size * 1.5, this.size * 0.22);
+            // Rocket tip (orange cone)
+            ctx.fillStyle = '#FF6F00';
+            ctx.beginPath();
+            ctx.moveTo(screenX + this.size * 1.3, screenY - this.size * 0.35);
+            ctx.lineTo(screenX + this.size * 1.3, screenY - this.size * 0.13);
+            ctx.lineTo(screenX + this.size * 1.65, screenY - this.size * 0.24);
+            ctx.closePath();
+            ctx.fill();
         } else if (this.type === 'medic') {
             // White body
             ctx.fillStyle = '#FFFFFF';
@@ -2650,15 +2696,19 @@ class GameAI {
         const unitTypes = this.cfg.unitTypes || ['soldier'];
         const canFactory = unitTypes.some(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter'].includes(t));
         const factoryTypes = unitTypes.filter(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter', 'apc'].includes(t));
-        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350, apc: 400, medic: 150 };
+        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350, apc: 400, medic: 150, bazooka: 300 };
 
         if (barracks && unitTypes.includes('soldier') && this.credits >= 100 && combatUnits.length < maxU) {
             this.produceUnit('soldier', barracks, 100);
         }
 
-        // Occasionally produce mortar teams from barracks
+        // Occasionally produce mortar or bazooka teams from barracks
         if (barracks && combatUnits.length < maxU && this.credits >= 350 && Math.random() < 0.3) {
-            this.produceUnit('mortar', barracks, 350);
+            if (unitTypes.includes('bazooka') && Math.random() < 0.5) {
+                this.produceUnit('bazooka', barracks, 300);
+            } else if (unitTypes.includes('mortar')) {
+                this.produceUnit('mortar', barracks, 350);
+            }
         }
 
         if (factory && combatUnits.length < maxU && factoryTypes.length > 0) {
@@ -3086,6 +3136,220 @@ const MISSIONS = [
             canBuildSilo: true,
             nukeInterval: 50,
             unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc']
+        }
+    },
+    {
+        id: 11,
+        name: 'Tank Hunters',
+        difficulty: 'Brigadier General',
+        difficultyColor: '#D81B60',
+        description: 'Enemy armor is pouring through every gap. Deploy your bazooka teams or watch your base get rolled over.',
+        playerCredits: 2000,
+        enemyCredits: 5500,
+        enemyExtraUnits: [
+            { type: 'tank', offsetX: 20, offsetY: -20 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'tank', offsetX: 70, offsetY: -30 },
+            { type: 'apc', offsetX: 30, offsetY: -50 },
+            { type: 'apc', offsetX: -50, offsetY: -60 },
+            { type: 'bazooka', offsetX: -20, offsetY: -20 },
+            { type: 'helicopter', offsetX: 10, offsetY: -40 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'aa_battery', offsetX: 0, offsetY: -180 }
+        ],
+        ai: {
+            attackIntervals: [7, 5, 3],
+            maxUnits: 36,
+            incomeRate: 38,
+            canBuildSilo: false,
+            unitTypes: ['soldier', 'tank', 'apc', 'helicopter', 'bazooka']
+        }
+    },
+    {
+        id: 12,
+        name: 'Guerrilla War',
+        difficulty: 'Field Marshal',
+        difficultyColor: '#C2185B',
+        description: 'Fast-moving commandos and bazooka squads are hitting your base from every direction. No front line, no safe zones.',
+        playerCredits: 1800,
+        enemyCredits: 6000,
+        enemyExtraUnits: [
+            { type: 'commando', offsetX: -20, offsetY: -20 },
+            { type: 'commando', offsetX: 30, offsetY: -10 },
+            { type: 'commando', offsetX: -40, offsetY: -50 },
+            { type: 'bazooka', offsetX: 50, offsetY: -30 },
+            { type: 'bazooka', offsetX: -60, offsetY: -60 },
+            { type: 'bazooka', offsetX: 20, offsetY: -70 },
+            { type: 'sniper', offsetX: -80, offsetY: -80 },
+            { type: 'helicopter', offsetX: 40, offsetY: -40 },
+            { type: 'helicopter', offsetX: -30, offsetY: -30 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'aa_battery', offsetX: -60, offsetY: -170 },
+            { type: 'missile_silo', offsetX: 0, offsetY: -160 }
+        ],
+        ai: {
+            attackIntervals: [6, 4, 3],
+            maxUnits: 40,
+            incomeRate: 44,
+            canBuildSilo: true,
+            nukeInterval: 75,
+            unitTypes: ['soldier', 'commando', 'sniper', 'bazooka', 'helicopter', 'mortar']
+        }
+    },
+    {
+        id: 13,
+        name: 'Death Valley',
+        difficulty: 'Grand Marshal',
+        difficultyColor: '#AD1457',
+        description: 'A killing field. Enemy has three lines of turrets, AA cover on all flanks, and constant air patrols.',
+        playerCredits: 2500,
+        enemyCredits: 7000,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -50, offsetY: -50 },
+            { type: 'helicopter', offsetX: 10, offsetY: -70 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'bazooka', offsetX: -20, offsetY: -20 },
+            { type: 'bazooka', offsetX: 40, offsetY: -50 },
+            { type: 'mortar', offsetX: 90, offsetY: -70 },
+            { type: 'commando', offsetX: -60, offsetY: -40 },
+            { type: 'artillery', offsetX: 80, offsetY: -40 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'missile_silo', offsetX: 0, offsetY: -160 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'turret', offsetX: -200, offsetY: -150 },
+            { type: 'turret', offsetX: 200, offsetY: -150 },
+            { type: 'turret', offsetX: 0, offsetY: -220 },
+            { type: 'aa_battery', offsetX: -80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 0, offsetY: -240 },
+            { type: 'sandbag', offsetX: -130, offsetY: -30 },
+            { type: 'sandbag', offsetX: 130, offsetY: -30 }
+        ],
+        ai: {
+            attackIntervals: [5, 3, 2],
+            maxUnits: 44,
+            incomeRate: 52,
+            canBuildSilo: true,
+            nukeInterval: 60,
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc']
+        }
+    },
+    {
+        id: 14,
+        name: 'Last Stand',
+        difficulty: 'Warlord',
+        difficultyColor: '#880E4F',
+        description: 'You start with almost nothing. They start with everything. Hold the line or die trying.',
+        playerCredits: 1200,
+        enemyCredits: 9000,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -50, offsetY: -50 },
+            { type: 'helicopter', offsetX: 10, offsetY: -70 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'tank', offsetX: 70, offsetY: -30 },
+            { type: 'bazooka', offsetX: -20, offsetY: -20 },
+            { type: 'bazooka', offsetX: 30, offsetY: -10 },
+            { type: 'commando', offsetX: -40, offsetY: -40 },
+            { type: 'mortar', offsetX: 90, offsetY: -70 },
+            { type: 'mortar', offsetX: -80, offsetY: -60 },
+            { type: 'artillery', offsetX: 80, offsetY: -40 },
+            { type: 'apc', offsetX: 60, offsetY: -50 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'missile_silo', offsetX: -60, offsetY: -160 },
+            { type: 'missile_silo', offsetX: 60, offsetY: -160 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'turret', offsetX: 0, offsetY: -220 },
+            { type: 'turret', offsetX: -200, offsetY: -150 },
+            { type: 'aa_battery', offsetX: -80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 80, offsetY: -180 },
+            { type: 'sandbag', offsetX: -130, offsetY: -30 },
+            { type: 'sandbag', offsetX: 130, offsetY: -30 }
+        ],
+        ai: {
+            attackIntervals: [4, 3, 2],
+            maxUnits: 50,
+            incomeRate: 65,
+            canBuildSilo: true,
+            nukeInterval: 50,
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc']
+        }
+    },
+    {
+        id: 15,
+        name: 'Armageddon',
+        difficulty: 'Conqueror',
+        difficultyColor: '#B71C1C',
+        description: 'Three silos. No mercy. The enemy does not stop. Win this and your name will be legend.',
+        playerCredits: 3500,
+        enemyCredits: 12000,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -50, offsetY: -50 },
+            { type: 'helicopter', offsetX: 10, offsetY: -70 },
+            { type: 'helicopter', offsetX: -10, offsetY: -90 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'tank', offsetX: 70, offsetY: -30 },
+            { type: 'tank', offsetX: -70, offsetY: -10 },
+            { type: 'bazooka', offsetX: -20, offsetY: -20 },
+            { type: 'bazooka', offsetX: 30, offsetY: -10 },
+            { type: 'bazooka', offsetX: -50, offsetY: -50 },
+            { type: 'commando', offsetX: -40, offsetY: -40 },
+            { type: 'commando', offsetX: 60, offsetY: -60 },
+            { type: 'mortar', offsetX: 90, offsetY: -70 },
+            { type: 'mortar', offsetX: -80, offsetY: -60 },
+            { type: 'artillery', offsetX: 80, offsetY: -40 },
+            { type: 'artillery', offsetX: -90, offsetY: -40 },
+            { type: 'apc', offsetX: 60, offsetY: -50 },
+            { type: 'apc', offsetX: -60, offsetY: -30 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'missile_silo', offsetX: -80, offsetY: -160 },
+            { type: 'missile_silo', offsetX: 0, offsetY: -170 },
+            { type: 'missile_silo', offsetX: 80, offsetY: -160 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'turret', offsetX: 0, offsetY: -220 },
+            { type: 'turret', offsetX: -200, offsetY: -150 },
+            { type: 'turret', offsetX: 200, offsetY: -150 },
+            { type: 'aa_battery', offsetX: -80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 0, offsetY: -250 },
+            { type: 'sandbag', offsetX: -130, offsetY: -30 },
+            { type: 'sandbag', offsetX: 130, offsetY: -30 }
+        ],
+        ai: {
+            attackIntervals: [3, 2, 1],
+            maxUnits: 55,
+            incomeRate: 80,
+            canBuildSilo: true,
+            nukeInterval: 40,
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc']
         }
     }
 ];
@@ -3538,7 +3802,8 @@ class Game {
             'helicopter': 'factory',
             'apc': 'factory',
             'mortar': 'barracks',
-            'medic': 'barracks'
+            'medic': 'barracks',
+            'bazooka': 'barracks'
         };
         const reqLabels = {
             'barracks': 'Barracks', 'factory': 'War Factory', 'hq': 'HQ'
@@ -3773,7 +4038,8 @@ class Game {
                         helicopter: 18,
                         apc: 22,
                         mortar: 14,
-                        medic: 12
+                        medic: 12,
+                        bazooka: 13
                     };
                     const unitSize = unitSizes[item.unitType] || 12;
                     const spawnPos = this.findSpawnPosition(item.building, unitSize);
@@ -4151,7 +4417,7 @@ class Game {
         overlay.id = 'campaign-overlay';
         overlay.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2000;`;
 
-        const diffColors = { Recruit: '#4CAF50', Corporal: '#8BC34A', Sergeant: '#FFC107', Commander: '#FF5722', General: '#F44336', 'Lieutenant Colonel': '#FF9800', Colonel: '#F44336', 'Major General': '#E91E63', 'Supreme Commander': '#FF1744' };
+        const diffColors = { Recruit: '#4CAF50', Corporal: '#8BC34A', Sergeant: '#FFC107', Commander: '#FF5722', General: '#F44336', 'Lieutenant Colonel': '#FF9800', Colonel: '#F44336', 'Major General': '#E91E63', 'Supreme Commander': '#FF1744', 'Brigadier General': '#D81B60', 'Field Marshal': '#C2185B', 'Grand Marshal': '#AD1457', Warlord: '#880E4F', Conqueror: '#B71C1C' };
 
         let missionCards = MISSIONS.map((m, i) => {
             const isUnlocked = i === 0 || completed.includes(MISSIONS[i - 1].id);
@@ -4821,7 +5087,7 @@ class Game {
             if (type === 'soldier') {
                 canProduce = hasBarracks;
                 missingBuilding = 'Barracks';
-            } else if (['mortar', 'medic'].includes(type)) {
+            } else if (['mortar', 'medic', 'bazooka'].includes(type)) {
                 canProduce = hasBarracks;
                 missingBuilding = 'Barracks';
             } else if (['tank', 'sniper', 'artillery', 'commando', 'helicopter', 'apc'].includes(type)) {
