@@ -792,9 +792,12 @@ class Unit {
         if (this.selected) {
             ctx.strokeStyle = '#fff';
             ctx.lineWidth = 2;
+            ctx.shadowColor = '#FFD700';
+            ctx.shadowBlur = 10;
             ctx.beginPath();
-            ctx.arc(screenX, screenY, this.size + 3, 0, Math.PI * 2);
+            ctx.arc(screenX, screenY, this.size + 4, 0, Math.PI * 2);
             ctx.stroke();
+            ctx.shadowBlur = 0;
         }
 
         // Health bar
@@ -803,11 +806,14 @@ class Unit {
         const barX = screenX - barWidth / 2;
         const barY = screenY - this.size - 8;
 
-        ctx.fillStyle = '#333';
+        const hpFrac = this.hp / this.maxHp;
+        const barColor = hpFrac > 0.6 ? '#4CAF50' : hpFrac > 0.3 ? '#FF9800' : '#f44336';
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(barX - 1, barY - 1, barWidth + 2, barHeight + 2);
+        ctx.fillStyle = '#222';
         ctx.fillRect(barX, barY, barWidth, barHeight);
-
-        ctx.fillStyle = this.hp > this.maxHp * 0.3 ? '#4CAF50' : '#f44336';
-        ctx.fillRect(barX, barY, barWidth * (this.hp / this.maxHp), barHeight);
+        ctx.fillStyle = barColor;
+        ctx.fillRect(barX, barY, barWidth * hpFrac, barHeight);
 
         if (this.veterancy > 0) {
             ctx.fillStyle = this.veterancy === 3 ? '#FF6B35' : this.veterancy === 2 ? '#E0E0E0' : '#FFD700';
@@ -923,6 +929,14 @@ class Building {
                 color: '#37474F',
                 provides: 'offense',
                 visionRadius: 200
+            },
+            aa_battery: {
+                maxHp: 175,
+                width: 42,
+                height: 42,
+                color: '#00695C',
+                provides: 'defense',
+                visionRadius: 400
             }
         };
 
@@ -940,6 +954,15 @@ class Building {
         if (type === 'missile_silo') {
             this.nukeCooldown = 0;
             this.maxNukeCooldown = 90;
+        }
+
+        // AA battery-specific properties
+        if (type === 'aa_battery') {
+            this.interceptCooldown = 0;
+            this.maxInterceptCooldown = 12;
+            this.interceptRange = 480;
+            this.radarAngle = 0;
+            this.interceptsTotal = 0;
         }
 
         this.repairing = false;
@@ -992,6 +1015,44 @@ class Building {
         if (this.type === 'missile_silo') {
             if (this.nukeCooldown > 0) {
                 this.nukeCooldown = Math.max(0, this.nukeCooldown - deltaTime);
+            }
+        }
+
+        // AA battery — intercept incoming nukes
+        if (this.type === 'aa_battery') {
+            this.radarAngle += deltaTime * 2.5; // rotate radar dish
+            if (this.interceptCooldown > 0) this.interceptCooldown -= deltaTime;
+
+            if (this.interceptCooldown <= 0) {
+                const target = game.nukes.find(n => {
+                    if (n.team === this.team) return false; // don't shoot own nukes
+                    const dx = n.x - this.x, dy = n.y - this.y;
+                    return Math.sqrt(dx * dx + dy * dy) <= this.interceptRange;
+                });
+                if (target) {
+                    // Burst of cyan particles at intercept point
+                    for (let i = 0; i < 18; i++) {
+                        const angle = (i / 18) * Math.PI * 2;
+                        const spd = 60 + Math.random() * 80;
+                        game.particles.push(new Particle(
+                            target.x, target.y, '#00E5FF',
+                            4 + Math.random() * 4,
+                            Math.cos(angle) * spd, Math.sin(angle) * spd
+                        ));
+                    }
+                    // Orange flash at battery
+                    for (let i = 0; i < 8; i++) {
+                        const angle = Math.random() * Math.PI * 2;
+                        game.particles.push(new Particle(
+                            this.x, this.y, '#FF6F00',
+                            3 + Math.random() * 3,
+                            Math.cos(angle) * 50, Math.sin(angle) * 50
+                        ));
+                    }
+                    target.dead = true;
+                    this.interceptCooldown = this.maxInterceptCooldown;
+                    this.interceptsTotal++;
+                }
             }
         }
 
@@ -1072,6 +1133,10 @@ class Building {
     render(ctx, camera) {
         const screenX = this.x - camera.x - this.width / 2;
         const screenY = this.y - camera.y - this.height / 2;
+
+        // Drop shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(screenX + 5, screenY + 5, this.width, this.height);
 
         // Custom rendering for sandbags
         if (this.type === 'sandbag') {
@@ -1405,6 +1470,60 @@ class Building {
                 ctx.fillText('RDY', cx, cy + 23);
             }
         }
+        else if (this.type === 'aa_battery') {
+            const cx = this.x - camera.x;
+            const cy = this.y - camera.y;
+            const teamColor = this.team === 'player' ? '#00695C' : '#6A1010';
+
+            // Base pad
+            ctx.fillStyle = teamColor;
+            ctx.fillRect(screenX, screenY, this.width, this.height);
+            ctx.strokeStyle = this.selected ? '#fff' : '#000';
+            ctx.lineWidth = this.selected ? 3 : 2;
+            ctx.strokeRect(screenX, screenY, this.width, this.height);
+
+            // Rotating radar dish arm
+            ctx.save();
+            ctx.translate(cx, cy);
+            ctx.rotate(this.radarAngle);
+            ctx.strokeStyle = '#00E5FF';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(0, 0);
+            ctx.lineTo(0, -16);
+            ctx.stroke();
+            ctx.fillStyle = '#00E5FF';
+            ctx.fillRect(-6, -18, 12, 4);
+            ctx.restore();
+
+            // Ready / recharging indicator
+            const ready = this.interceptCooldown <= 0;
+            ctx.fillStyle = ready ? '#00E5FF' : '#FF6F00';
+            ctx.beginPath();
+            ctx.arc(cx, cy + 14, 5, 0, Math.PI * 2);
+            ctx.fill();
+
+            if (!ready) {
+                const frac = 1 - this.interceptCooldown / this.maxInterceptCooldown;
+                ctx.strokeStyle = '#00E5FF';
+                ctx.lineWidth = 3;
+                ctx.beginPath();
+                ctx.arc(cx, cy + 14, 8, -Math.PI / 2, -Math.PI / 2 + frac * Math.PI * 2);
+                ctx.stroke();
+            }
+
+            // Range ring when selected
+            if (this.selected) {
+                ctx.strokeStyle = 'rgba(0,229,255,0.25)';
+                ctx.lineWidth = 1;
+                ctx.setLineDash([6, 4]);
+                ctx.beginPath();
+                ctx.arc(cx, cy, this.interceptRange, 0, Math.PI * 2);
+                ctx.stroke();
+                ctx.setLineDash([]);
+            }
+        }
+
         // Default fallback
         else {
             ctx.fillStyle = this.team === 'player' ? this.color : '#B71C1C';
@@ -1420,17 +1539,31 @@ class Building {
             ctx.fillText(this.type.toUpperCase(), this.x - camera.x, this.y - camera.y + 4);
         }
 
+        // Selection glow ring
+        if (this.selected) {
+            ctx.strokeStyle = '#ffffff';
+            ctx.lineWidth = 3;
+            ctx.shadowColor = '#FFD700';
+            ctx.shadowBlur = 12;
+            ctx.strokeRect(screenX - 2, screenY - 2, this.width + 4, this.height + 4);
+            ctx.shadowBlur = 0;
+        }
+
         // Health bar (for all buildings)
         const barWidth = this.width;
         const barHeight = 6;
         const barX = screenX;
         const barY = screenY - 10;
 
-        ctx.fillStyle = '#333';
+        const hpFrac = this.hp / this.maxHp;
+        const barColor = hpFrac > 0.6 ? '#4CAF50' : hpFrac > 0.3 ? '#FF9800' : '#f44336';
+        // Background + border
+        ctx.fillStyle = 'rgba(0,0,0,0.6)';
+        ctx.fillRect(barX - 1, barY - 1, barWidth + 2, barHeight + 2);
+        ctx.fillStyle = '#222';
         ctx.fillRect(barX, barY, barWidth, barHeight);
-
-        ctx.fillStyle = this.hp > this.maxHp * 0.3 ? '#4CAF50' : '#f44336';
-        ctx.fillRect(barX, barY, barWidth * (this.hp / this.maxHp), barHeight);
+        ctx.fillStyle = barColor;
+        ctx.fillRect(barX, barY, barWidth * hpFrac, barHeight);
 
         if (this.garrison && this.garrison.length > 0) {
             const cx = this.x - camera.x;
@@ -2380,6 +2513,7 @@ class GameAI {
         const hasPower = myBuildings.some(b => b.type === 'power');
         const hasRefinery = myBuildings.some(b => b.type === 'refinery');
         const hasSilo = myBuildings.some(b => b.type === 'missile_silo');
+        const hasAA = myBuildings.some(b => b.type === 'aa_battery');
 
         const buildSlots = [
             { dx: 120, dy: 0 },
@@ -2410,6 +2544,7 @@ class GameAI {
         else if (!hasPower) tryPlace('power', 200);
         else if (!hasBarracks) tryPlace('barracks', 300);
         else if (!hasFactory && hasBarracks) tryPlace('factory', 500);
+        else if (!hasAA && hasFactory) tryPlace('aa_battery', 800);
         else if (this.cfg.canBuildSilo && !hasSilo) tryPlace('missile_silo', 1500);
     }
 
@@ -2578,9 +2713,10 @@ const MISSIONS = [
 ];
 
 const BUILD_PREREQS = {
-    factory: { requires: 'barracks', label: 'Barracks' },
-    turret:  { requires: 'barracks', label: 'Barracks' },
-    missile_silo: { requires: 'factory', label: 'War Factory' }
+    factory:      { requires: 'barracks', label: 'Barracks' },
+    turret:       { requires: 'barracks', label: 'Barracks' },
+    aa_battery:   { requires: 'factory',  label: 'War Factory' },
+    missile_silo: { requires: 'factory',  label: 'War Factory' }
 };
 
 // ========== MAIN GAME ==========
@@ -2649,6 +2785,9 @@ class Game {
         this.playerFog = new Uint8Array(this.fogCols * this.fogRows);
         this.enemyFog = new Uint8Array(this.fogCols * this.fogRows);
         this.initResourceDeposits();
+
+        this.decorations = [];
+        this.initDecorations();
 
         this.resizeCanvas();
 
@@ -3245,6 +3384,14 @@ class Game {
         this.shockwaves.forEach(s => s.update(deltaTime));
 
         this.units = this.units.filter(unit => unit.hp > 0);
+
+        // Clear selected building reference if it was destroyed
+        if (this.selectedBuilding && this.selectedBuilding.hp <= 0) {
+            this.selectedBuilding.selected = false;
+            this.selectedBuilding = null;
+            this.updateUI();
+        }
+
         this.buildings = this.buildings.filter(building => building.hp > 0);
         this.projectiles = this.projectiles.filter(projectile => !projectile.dead);
         this.particles = this.particles.filter(particle => particle.life > 0);
@@ -3388,6 +3535,7 @@ class Game {
         }
         // Step 2: re-mark currently visible tiles
         this.units.forEach(u => {
+            if (u.garrisonedIn) return; // building provides vision instead
             const grid = u.team === this.playerTeam ? this.playerFog : this.enemyFog;
             this.markFogVisible(u.x, u.y, u.visionRadius || 200, grid);
         });
@@ -3663,20 +3811,6 @@ class Game {
         this.updateUI();
     }
 
-    checkGameOver() {
-        if (this.gameState !== 'playing') return;
-
-        const playerHQ = this.buildings.find(b => b.team === this.playerTeam && b.type === 'hq');
-        const enemyHQ = this.buildings.find(b => b.team === this.enemyTeam && b.type === 'hq');
-
-        if (!playerHQ) {
-            this.gameState = 'defeat';
-            this.showGameOverScreen('DEFEAT', 'Your base has been destroyed!', '#f44336');
-        } else if (!enemyHQ) {
-            this.gameState = 'victory';
-            this.showGameOverScreen('VICTORY', 'Enemy base destroyed!', '#4CAF50');
-        }
-    }
 
     showGameOverScreen(title, message, color) {
         // Create game over overlay
@@ -3756,17 +3890,25 @@ class Game {
         this.ctx.save();
         this.ctx.scale(sx, sy);
 
-        // Draw ground
+        // Richer ground base
         this.ctx.fillStyle = '#3a6b1f';
         this.ctx.fillRect(0, 0, this.camera.width, this.camera.height);
 
-        // Grass texture variation
-        for (let i = 0; i < 50; i++) {
-            const x = Math.random() * this.camera.width;
-            const y = Math.random() * this.camera.height;
-            this.ctx.fillStyle = 'rgba(50, 90, 30, 0.1)';
-            this.ctx.fillRect(x, y, 40, 40);
+        // Subtle ground color variation using a grid pattern
+        const tileSize = 120;
+        const camOffX = Math.floor(this.camera.x / tileSize);
+        const camOffY = Math.floor(this.camera.y / tileSize);
+        for (let gx = camOffX - 1; gx < camOffX + Math.ceil(this.camera.width / tileSize) + 1; gx++) {
+            for (let gy = camOffY - 1; gy < camOffY + Math.ceil(this.camera.height / tileSize) + 1; gy++) {
+                const v = (Math.sin(gx * 3.7 + gy * 2.3) + 1) * 0.5;
+                const shade = Math.floor(v * 12);
+                this.ctx.fillStyle = `rgba(0,0,0,${0.03 + shade * 0.006})`;
+                this.ctx.fillRect(gx * tileSize - this.camera.x, gy * tileSize - this.camera.y, tileSize, tileSize);
+            }
         }
+
+        // Draw static decorations (rocks, dirt patches, trees)
+        this.drawDecorations();
 
         // Viewport culling - only render visible entities
         const buffer = 100;
@@ -3853,6 +3995,15 @@ class Game {
         if (this.buildMode) {
             this.drawBuildPreview();
         }
+
+        // World boundary indicators
+        const edgeLeft = -this.camera.x;
+        const edgeTop = -this.camera.y;
+        const edgeRight = this.worldWidth - this.camera.x;
+        const edgeBottom = this.worldHeight - this.camera.y;
+        this.ctx.strokeStyle = 'rgba(100,60,20,0.6)';
+        this.ctx.lineWidth = 8;
+        this.ctx.strokeRect(edgeLeft, edgeTop, this.worldWidth, this.worldHeight);
 
         this.ctx.restore(); // End viewport scale
 
@@ -4063,8 +4214,89 @@ class Game {
         }
     }
 
+    initDecorations() {
+        this.decorations = [];
+        let seed = 42;
+        const rng = () => { seed = (seed * 1664525 + 1013904223) & 0xffffffff; return (seed >>> 0) / 0xffffffff; };
+
+        // Dirt patches
+        for (let i = 0; i < 80; i++) {
+            this.decorations.push({ type: 'dirt', x: rng()*this.worldWidth, y: rng()*this.worldHeight,
+                w: 40+rng()*50, h: 30+rng()*40, angle: rng()*Math.PI });
+        }
+        // Rocks
+        for (let i = 0; i < 120; i++) {
+            this.decorations.push({ type: 'rock', x: rng()*this.worldWidth, y: rng()*this.worldHeight,
+                radius: 6+rng()*8 });
+        }
+        // Trees — avoid start bases
+        let treesPlaced = 0;
+        while (treesPlaced < 200) {
+            const x = rng() * this.worldWidth;
+            const y = rng() * this.worldHeight;
+            const nearPlayerBase = x < 500 && y < 500;
+            const nearEnemyBase = x > 2100 && y > 1200;
+            if (nearPlayerBase || nearEnemyBase) continue;
+            const r = 12 + rng() * 10;
+            const g1 = Math.floor(80 + rng()*50);
+            const g2 = Math.floor(100 + rng()*60);
+            this.decorations.push({ type: 'tree', x, y, radius: r,
+                dark: `rgb(20,${g1},20)`, light: `rgb(30,${g2},30)` });
+            treesPlaced++;
+        }
+    }
+
+    drawDecorations() {
+        const cam = this.camera;
+        const buf = 50;
+        this.decorations.forEach(d => {
+            const sx = d.x - cam.x;
+            const sy = d.y - cam.y;
+            if (sx < -buf || sx > cam.width + buf || sy < -buf || sy > cam.height + buf) return;
+            if (!this.isExploredByPlayer(d.x, d.y)) return;
+
+            if (d.type === 'dirt') {
+                this.ctx.fillStyle = 'rgba(101,67,33,0.22)';
+                this.ctx.beginPath();
+                this.ctx.ellipse(sx, sy, d.w/2, d.h/2, d.angle || 0, 0, Math.PI*2);
+                this.ctx.fill();
+            } else if (d.type === 'rock') {
+                this.ctx.fillStyle = '#7a7a6a';
+                this.ctx.beginPath();
+                this.ctx.arc(sx, sy, d.radius, 0, Math.PI*2);
+                this.ctx.fill();
+                this.ctx.fillStyle = 'rgba(255,255,255,0.15)';
+                this.ctx.beginPath();
+                this.ctx.arc(sx - d.radius*0.2, sy - d.radius*0.3, d.radius*0.45, 0, Math.PI*2);
+                this.ctx.fill();
+            } else if (d.type === 'tree') {
+                // Shadow
+                this.ctx.fillStyle = 'rgba(0,0,0,0.18)';
+                this.ctx.beginPath();
+                this.ctx.ellipse(sx + 4, sy + 6, d.radius * 0.9, d.radius * 0.45, 0, 0, Math.PI * 2);
+                this.ctx.fill();
+                // Trunk
+                this.ctx.fillStyle = '#5D4037';
+                this.ctx.fillRect(sx - 3, sy, 6, d.radius * 0.7);
+                // Canopy layers
+                this.ctx.fillStyle = d.dark || '#1B5E20';
+                this.ctx.beginPath();
+                this.ctx.arc(sx, sy - d.radius * 0.2, d.radius * 1.05, 0, Math.PI*2);
+                this.ctx.fill();
+                this.ctx.fillStyle = d.light || '#2E7D32';
+                this.ctx.beginPath();
+                this.ctx.arc(sx - d.radius*0.15, sy - d.radius * 0.5, d.radius * 0.75, 0, Math.PI*2);
+                this.ctx.fill();
+                this.ctx.fillStyle = 'rgba(144,238,100,0.25)';
+                this.ctx.beginPath();
+                this.ctx.arc(sx - d.radius*0.2, sy - d.radius*0.55, d.radius*0.35, 0, Math.PI*2);
+                this.ctx.fill();
+            }
+        });
+    }
+
     updateUI() {
-        document.getElementById('credits').textContent = this.resources.credits;
+        document.getElementById('credits').textContent = Math.floor(this.resources.credits);
         document.getElementById('power').textContent =
             `${this.resources.power}/${this.resources.maxPower}`;
 
@@ -4077,6 +4309,12 @@ class Game {
             info = `${this.selectedUnits.length} unit(s) — Click where to ATTACK`;
         } else if (this.selectedUnits.length > 0) {
             info = `${this.selectedUnits.length} unit(s) selected — M: move  A: attack  Right-click: move+deselect`;
+        } else if (this.selectedBuilding && this.selectedBuilding.type === 'aa_battery') {
+            const aa = this.selectedBuilding;
+            const ready = aa.interceptCooldown <= 0;
+            info = ready
+                ? `🛰 AA Battery ready — intercepts nukes within ${aa.interceptRange} units (${aa.interceptsTotal} destroyed)`
+                : `🛰 AA Battery recharging — ${Math.ceil(aa.interceptCooldown)}s remaining (${aa.interceptsTotal} destroyed)`;
         } else if (this.selectedBuilding && this.selectedBuilding.type === 'missile_silo') {
             const silo = this.selectedBuilding;
             const ready = silo.nukeCooldown <= 0;
@@ -4191,13 +4429,11 @@ class Game {
     }
 
     gameLoop(currentTime) {
-        const deltaTime = (currentTime - this.lastTime) / 1000;
+        const deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1);
         this.lastTime = currentTime;
 
-        if (deltaTime < 0.1) {
-            this.update(deltaTime);
-            this.render();
-        }
+        this.update(deltaTime);
+        this.render();
 
         requestAnimationFrame((time) => this.gameLoop(time));
     }
