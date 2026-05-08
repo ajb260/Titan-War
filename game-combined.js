@@ -2649,8 +2649,8 @@ class GameAI {
 
         const unitTypes = this.cfg.unitTypes || ['soldier'];
         const canFactory = unitTypes.some(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter'].includes(t));
-        const factoryTypes = unitTypes.filter(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter'].includes(t));
-        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350 };
+        const factoryTypes = unitTypes.filter(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter', 'apc'].includes(t));
+        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350, apc: 400, medic: 150 };
 
         if (barracks && unitTypes.includes('soldier') && this.credits >= 100 && combatUnits.length < maxU) {
             this.produceUnit('soldier', barracks, 100);
@@ -2908,6 +2908,184 @@ const MISSIONS = [
             canBuildSilo: true,
             nukeInterval: 80,
             unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando']
+        }
+    },
+    {
+        id: 6,
+        name: 'Air Superiority',
+        difficulty: 'Lieutenant Colonel',
+        difficultyColor: '#FF9800',
+        description: 'Enemy gunships are hunting your troops from the sky. Build AA Batteries or watch your army get shredded.',
+        playerCredits: 2000,
+        enemyCredits: 3500,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -30, offsetY: -50 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'soldier', offsetX: -20, offsetY: -20 },
+            { type: 'soldier', offsetX: 20, offsetY: -40 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'aa_battery', offsetX: -60, offsetY: -170 }
+        ],
+        ai: {
+            attackIntervals: [10, 7, 5],
+            maxUnits: 28,
+            incomeRate: 28,
+            canBuildSilo: false,
+            unitTypes: ['soldier', 'tank', 'sniper', 'helicopter']
+        }
+    },
+    {
+        id: 7,
+        name: 'Shock & Awe',
+        difficulty: 'Colonel',
+        difficultyColor: '#F44336',
+        description: 'Enemy APCs are rolling in with troops and mortar teams are raining shells from beyond your sight range.',
+        playerCredits: 1800,
+        enemyCredits: 4000,
+        enemyExtraUnits: [
+            { type: 'apc', offsetX: 30, offsetY: -20 },
+            { type: 'apc', offsetX: -30, offsetY: -50 },
+            { type: 'mortar', offsetX: 80, offsetY: -60 },
+            { type: 'mortar', offsetX: -60, offsetY: -80 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'helicopter', offsetX: -20, offsetY: -30 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'turret', offsetX: -150, offsetY: -60 },
+            { type: 'turret', offsetX: 80, offsetY: -170 },
+            { type: 'aa_battery', offsetX: -60, offsetY: -170 }
+        ],
+        ai: {
+            attackIntervals: [8, 6, 4],
+            maxUnits: 33,
+            incomeRate: 33,
+            canBuildSilo: false,
+            unitTypes: ['soldier', 'tank', 'sniper', 'helicopter', 'mortar', 'apc']
+        }
+    },
+    {
+        id: 8,
+        name: 'Blitzkrieg',
+        difficulty: 'Major General',
+        difficultyColor: '#E91E63',
+        description: 'Relentless waves, nuclear capability, and air cover. There is no rest. There is no mercy.',
+        playerCredits: 2200,
+        enemyCredits: 5000,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -50, offsetY: -50 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'mortar', offsetX: 90, offsetY: -70 },
+            { type: 'commando', offsetX: -20, offsetY: -20 },
+            { type: 'artillery', offsetX: 80, offsetY: -40 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'missile_silo', offsetX: 0, offsetY: -160 },
+            { type: 'aa_battery', offsetX: -60, offsetY: -170 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'turret', offsetX: -160, offsetY: -60 }
+        ],
+        ai: {
+            attackIntervals: [6, 4, 3],
+            maxUnits: 38,
+            incomeRate: 40,
+            canBuildSilo: true,
+            nukeInterval: 70,
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar']
+        }
+    },
+    {
+        id: 9,
+        name: 'Iron Fortress',
+        difficulty: 'General',
+        difficultyColor: '#9C27B0',
+        description: 'A heavily fortified bunker complex bristling with turrets and AA. Crack it open with everything you have.',
+        playerCredits: 2500,
+        enemyCredits: 6000,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -50, offsetY: -50 },
+            { type: 'helicopter', offsetX: 10, offsetY: -70 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'commando', offsetX: -20, offsetY: -20 },
+            { type: 'commando', offsetX: 30, offsetY: -10 },
+            { type: 'mortar', offsetX: 90, offsetY: -70 },
+            { type: 'artillery', offsetX: 80, offsetY: -40 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'missile_silo', offsetX: 0, offsetY: -160 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'turret', offsetX: 0, offsetY: -200 },
+            { type: 'aa_battery', offsetX: -80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 80, offsetY: -180 },
+            { type: 'sandbag', offsetX: -130, offsetY: -30 },
+            { type: 'sandbag', offsetX: 130, offsetY: -30 }
+        ],
+        ai: {
+            attackIntervals: [5, 3, 2],
+            maxUnits: 44,
+            incomeRate: 48,
+            canBuildSilo: true,
+            nukeInterval: 60,
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc']
+        }
+    },
+    {
+        id: 10,
+        name: "Titan's Fall",
+        difficulty: 'Supreme Commander',
+        difficultyColor: '#FF1744',
+        description: 'The final battle. Two silos. Maximum forces. No reinforcements. Win this and the war is over.',
+        playerCredits: 3000,
+        enemyCredits: 8000,
+        enemyExtraUnits: [
+            { type: 'helicopter', offsetX: 30, offsetY: -30 },
+            { type: 'helicopter', offsetX: -50, offsetY: -50 },
+            { type: 'helicopter', offsetX: 10, offsetY: -70 },
+            { type: 'tank', offsetX: 50, offsetY: 10 },
+            { type: 'tank', offsetX: -30, offsetY: 20 },
+            { type: 'tank', offsetX: 70, offsetY: -30 },
+            { type: 'commando', offsetX: -20, offsetY: -20 },
+            { type: 'commando', offsetX: 30, offsetY: -10 },
+            { type: 'mortar', offsetX: 90, offsetY: -70 },
+            { type: 'mortar', offsetX: -80, offsetY: -60 },
+            { type: 'artillery', offsetX: 80, offsetY: -40 },
+            { type: 'sniper', offsetX: -60, offsetY: -80 }
+        ],
+        enemyExtraBuildings: [
+            { type: 'barracks', offsetX: -100, offsetY: -100 },
+            { type: 'factory', offsetX: 120, offsetY: -100 },
+            { type: 'missile_silo', offsetX: -60, offsetY: -160 },
+            { type: 'missile_silo', offsetX: 60, offsetY: -160 },
+            { type: 'turret', offsetX: -160, offsetY: -60 },
+            { type: 'turret', offsetX: 170, offsetY: -60 },
+            { type: 'turret', offsetX: 0, offsetY: -210 },
+            { type: 'turret', offsetX: -200, offsetY: -150 },
+            { type: 'aa_battery', offsetX: -80, offsetY: -180 },
+            { type: 'aa_battery', offsetX: 80, offsetY: -180 },
+            { type: 'sandbag', offsetX: -130, offsetY: -30 },
+            { type: 'sandbag', offsetX: 130, offsetY: -30 }
+        ],
+        ai: {
+            attackIntervals: [4, 3, 2],
+            maxUnits: 50,
+            incomeRate: 60,
+            canBuildSilo: true,
+            nukeInterval: 50,
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc']
         }
     }
 ];
@@ -3973,7 +4151,7 @@ class Game {
         overlay.id = 'campaign-overlay';
         overlay.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.92);display:flex;flex-direction:column;align-items:center;justify-content:center;z-index:2000;`;
 
-        const diffColors = { Recruit: '#4CAF50', Corporal: '#8BC34A', Sergeant: '#FFC107', Commander: '#FF5722', General: '#F44336' };
+        const diffColors = { Recruit: '#4CAF50', Corporal: '#8BC34A', Sergeant: '#FFC107', Commander: '#FF5722', General: '#F44336', 'Lieutenant Colonel': '#FF9800', Colonel: '#F44336', 'Major General': '#E91E63', 'Supreme Commander': '#FF1744' };
 
         let missionCards = MISSIONS.map((m, i) => {
             const isUnlocked = i === 0 || completed.includes(MISSIONS[i - 1].id);
