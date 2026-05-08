@@ -408,6 +408,19 @@ class Unit {
                 canCrush: false,
                 visionRadius: 200
             },
+            general: {
+                maxHp: 350,
+                speed: 70,
+                damage: 40,
+                range: 160,
+                attackSpeed: 1.2,
+                size: 17,
+                color: '#FFD700',
+                weight: 2,
+                canCrush: false,
+                auraRadius: 160,
+                visionRadius: 300
+            },
             medic: {
                 maxHp: 55,
                 speed: 75,
@@ -753,9 +766,10 @@ class Unit {
 
     attack(target, deltaTime, game) {
         if (this.attackCooldown <= 0 && this.damage > 0) {
-            // Create a projectile instead of instant damage
             const projectile = this.createProjectile(target);
-            projectile.game = game; // needed for AoE
+            projectile.game = game;
+            // Command boost: +30% damage when near a friendly general
+            if (this.commandBoost) projectile.damage = Math.round(projectile.damage * 1.3);
             // Muzzle flash
             for (let i = 0; i < 4; i++) {
                 const a = Math.atan2(target.y - this.y, target.x - this.x) + (Math.random()-0.5) * 0.6;
@@ -1011,6 +1025,43 @@ class Unit {
             ctx.lineTo(screenX + this.size * 1.65, screenY - this.size * 0.24);
             ctx.closePath();
             ctx.fill();
+        } else if (this.type === 'general') {
+            const gColor = this.team === 'player' ? '#FFD700' : '#FF1744';
+            // Aura ring (pulsing)
+            const pulse = 0.55 + Math.sin(Date.now() / 400) * 0.2;
+            ctx.save();
+            ctx.globalAlpha = pulse * 0.25;
+            ctx.strokeStyle = gColor;
+            ctx.lineWidth = 3;
+            ctx.beginPath();
+            ctx.arc(screenX, screenY, this.auraRadius, 0, Math.PI * 2);
+            ctx.stroke();
+            ctx.globalAlpha = 1;
+            ctx.restore();
+            // Body
+            ctx.fillStyle = gColor;
+            // Peaked cap
+            ctx.beginPath();
+            ctx.moveTo(screenX - this.size * 0.55, screenY - this.size * 0.6);
+            ctx.lineTo(screenX + this.size * 0.55, screenY - this.size * 0.6);
+            ctx.lineTo(screenX + this.size * 0.35, screenY - this.size * 1.0);
+            ctx.lineTo(screenX - this.size * 0.35, screenY - this.size * 1.0);
+            ctx.closePath();
+            ctx.fill();
+            // Cap brim
+            ctx.fillRect(screenX - this.size * 0.6, screenY - this.size * 0.65, this.size * 1.2, this.size * 0.18);
+            // Head
+            ctx.beginPath();
+            ctx.arc(screenX, screenY - this.size * 0.3, this.size * 0.32, 0, Math.PI * 2);
+            ctx.fill();
+            // Body/coat
+            ctx.fillRect(screenX - this.size * 0.38, screenY - this.size * 0.05, this.size * 0.76, this.size * 0.75);
+            // Gold star on chest
+            ctx.fillStyle = this.team === 'player' ? '#FFFFFF' : '#FFD700';
+            ctx.font = `bold ${Math.round(this.size * 0.55)}px Arial`;
+            ctx.textAlign = 'center';
+            ctx.fillText('★', screenX, screenY + this.size * 0.4);
+            ctx.textAlign = 'left';
         } else if (this.type === 'medic') {
             // White body
             ctx.fillStyle = '#FFFFFF';
@@ -2696,10 +2747,16 @@ class GameAI {
         const unitTypes = this.cfg.unitTypes || ['soldier'];
         const canFactory = unitTypes.some(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter'].includes(t));
         const factoryTypes = unitTypes.filter(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter', 'apc'].includes(t));
-        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350, apc: 400, medic: 150, bazooka: 300 };
+        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350, apc: 400, medic: 150, bazooka: 300, general: 800 };
 
         if (barracks && unitTypes.includes('soldier') && this.credits >= 100 && combatUnits.length < maxU) {
             this.produceUnit('soldier', barracks, 100);
+        }
+
+        // Produce a general if allowed and none exists yet
+        if (barracks && unitTypes.includes('general') && this.credits >= 800) {
+            const hasGeneral = combatUnits.some(u => u.type === 'general');
+            if (!hasGeneral) this.produceUnit('general', barracks, 800);
         }
 
         // Occasionally produce mortar or bazooka teams from barracks
@@ -3090,7 +3147,7 @@ const MISSIONS = [
             incomeRate: 48,
             canBuildSilo: true,
             nukeInterval: 60,
-            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc']
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc', 'general']
         }
     },
     {
@@ -3135,7 +3192,7 @@ const MISSIONS = [
             incomeRate: 60,
             canBuildSilo: true,
             nukeInterval: 50,
-            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc']
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'mortar', 'apc', 'general']
         }
     },
     {
@@ -3248,7 +3305,7 @@ const MISSIONS = [
             incomeRate: 52,
             canBuildSilo: true,
             nukeInterval: 60,
-            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc']
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc', 'general']
         }
     },
     {
@@ -3294,7 +3351,7 @@ const MISSIONS = [
             incomeRate: 65,
             canBuildSilo: true,
             nukeInterval: 50,
-            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc']
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc', 'general']
         }
     },
     {
@@ -3349,7 +3406,7 @@ const MISSIONS = [
             incomeRate: 80,
             canBuildSilo: true,
             nukeInterval: 40,
-            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc']
+            unitTypes: ['soldier', 'tank', 'sniper', 'artillery', 'commando', 'helicopter', 'bazooka', 'mortar', 'apc', 'general']
         }
     }
 ];
@@ -3792,6 +3849,15 @@ class Game {
 
     produceUnit(type, cost) {
         const infoEl = document.getElementById('selected-info');
+
+        // Only one General allowed at a time
+        if (type === 'general' && this.units.some(u => u.type === 'general' && u.team === this.playerTeam)) {
+            infoEl.textContent = '⚠️ You already have a General in the field!';
+            infoEl.style.color = '#f44336';
+            setTimeout(() => { infoEl.textContent = ''; infoEl.style.color = '#aaa'; }, 2000);
+            return;
+        }
+
         const requirements = {
             'soldier': 'barracks',
             'tank': 'factory',
@@ -3803,7 +3869,8 @@ class Game {
             'apc': 'factory',
             'mortar': 'barracks',
             'medic': 'barracks',
-            'bazooka': 'barracks'
+            'bazooka': 'barracks',
+            'general': 'barracks'
         };
         const reqLabels = {
             'barracks': 'Barracks', 'factory': 'War Factory', 'hq': 'HQ'
@@ -3971,6 +4038,17 @@ class Game {
             unit.update(deltaTime, this);
         });
 
+        // General aura — clear then re-apply each frame
+        this.units.forEach(u => { u.commandBoost = false; });
+        this.units.forEach(gen => {
+            if (gen.type !== 'general' || gen.garrisonedIn || gen.hp <= 0) return;
+            this.units.forEach(u => {
+                if (u === gen || u.team !== gen.team || u.garrisonedIn) return;
+                const dx = u.x - gen.x, dy = u.y - gen.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= gen.auraRadius) u.commandBoost = true;
+            });
+        });
+
         this.buildings.forEach(building => {
             building.update(deltaTime, this);
         });
@@ -4039,7 +4117,8 @@ class Game {
                         apc: 22,
                         mortar: 14,
                         medic: 12,
-                        bazooka: 13
+                        bazooka: 13,
+                        general: 17
                     };
                     const unitSize = unitSizes[item.unitType] || 12;
                     const spawnPos = this.findSpawnPosition(item.building, unitSize);
@@ -5087,7 +5166,7 @@ class Game {
             if (type === 'soldier') {
                 canProduce = hasBarracks;
                 missingBuilding = 'Barracks';
-            } else if (['mortar', 'medic', 'bazooka'].includes(type)) {
+            } else if (['mortar', 'medic', 'bazooka', 'general'].includes(type)) {
                 canProduce = hasBarracks;
                 missingBuilding = 'Barracks';
             } else if (['tank', 'sniper', 'artillery', 'commando', 'helicopter', 'apc'].includes(type)) {
