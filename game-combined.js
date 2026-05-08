@@ -30,7 +30,7 @@ class Particle {
 
 // ========== PROJECTILES ==========
 class Projectile {
-    constructor(x, y, target, damage, speed, size, color, type, owner = null) {
+    constructor(x, y, target, damage, speed, size, color, type, owner = null, game = null) {
         this.x = x;
         this.y = y;
         this.target = target;
@@ -41,6 +41,10 @@ class Projectile {
         this.type = type;
         this.dead = false;
         this.owner = owner;
+        this.game = game;
+        this.aoe = (type === 'mortar_shell') ? 70 : 0;
+        this.trailX = x;
+        this.trailY = y;
     }
 
     update(deltaTime) {
@@ -48,6 +52,10 @@ class Projectile {
             this.dead = true;
             return;
         }
+
+        // Save trail position before moving
+        this.trailX = this.x;
+        this.trailY = this.y;
 
         // Move toward target
         const dx = this.target.x - this.x;
@@ -59,6 +67,19 @@ class Projectile {
             this.target.hp -= this.damage;
             if (this.target.hp <= 0 && this.owner && typeof this.owner.addKill === 'function') {
                 this.owner.addKill();
+            }
+            // AoE splash damage for mortar shells
+            if (this.aoe > 0 && this.game) {
+                [...this.game.units, ...this.game.buildings].forEach(entity => {
+                    if (entity === this.target) return;
+                    if (entity.team === (this.owner ? this.owner.team : null)) return;
+                    const ex = entity.x - this.x, ey = entity.y - this.y;
+                    const ed = Math.sqrt(ex*ex + ey*ey);
+                    if (ed < this.aoe) {
+                        entity.hp -= this.damage * (1 - ed / this.aoe);
+                    }
+                });
+                this.game.createExplosion(this.x, this.y, 40, '#FF4500');
             }
             this.dead = true;
         } else {
@@ -72,6 +93,18 @@ class Projectile {
     render(ctx, camera) {
         const screenX = this.x - camera.x;
         const screenY = this.y - camera.y;
+
+        if (this.type === 'bullet' || this.type === 'shell' || this.type === 'artillery_shell') {
+            ctx.save();
+            ctx.globalAlpha = 0.5;
+            ctx.strokeStyle = this.color;
+            ctx.lineWidth = this.type === 'bullet' ? 1.5 : 2.5;
+            ctx.beginPath();
+            ctx.moveTo(this.trailX - camera.x, this.trailY - camera.y);
+            ctx.lineTo(screenX, screenY);
+            ctx.stroke();
+            ctx.restore();
+        }
 
         ctx.fillStyle = this.color;
         ctx.beginPath();
@@ -151,6 +184,9 @@ class NukeProjectile {
                 building.hp -= Math.round(building.maxHp * (1.1 - dist / r * 0.4));
             }
         });
+
+        // Screen shake for nuke
+        this.game.addShake(20, 0.6);
 
         // Massive particle burst
         const colors = ['#FF4500', '#FF6347', '#FFA500', '#FFD700', '#FFFFFF', '#FF0000'];
@@ -313,6 +349,55 @@ class Unit {
                 weight: 1,
                 canCrush: false,
                 visionRadius: 260
+            },
+            helicopter: {
+                maxHp: 120,
+                speed: 130,
+                damage: 18,
+                range: 200,
+                attackSpeed: 1.0,
+                size: 18,
+                color: '#546E7A',
+                weight: 1,
+                canCrush: false,
+                isAir: true,
+                visionRadius: 300
+            },
+            apc: {
+                maxHp: 230,
+                speed: 55,
+                damage: 12,
+                range: 130,
+                attackSpeed: 1.2,
+                size: 22,
+                color: '#78909C',
+                weight: 6,
+                canCrush: true,
+                visionRadius: 200
+            },
+            mortar: {
+                maxHp: 65,
+                speed: 32,
+                damage: 55,
+                range: 370,
+                attackSpeed: 5.0,
+                size: 14,
+                color: '#8D6E63',
+                weight: 2,
+                canCrush: false,
+                visionRadius: 180
+            },
+            medic: {
+                maxHp: 55,
+                speed: 75,
+                damage: 0,
+                range: 0,
+                attackSpeed: 0,
+                size: 12,
+                color: '#FFFFFF',
+                weight: 1,
+                canCrush: false,
+                visionRadius: 200
             }
         };
 
@@ -363,6 +448,34 @@ class Unit {
         if (this.garrisonedIn) return; // garrisoned units don't move or act
         if (this.type === 'harvester') {
             this.updateHarvester(deltaTime, game);
+            return;
+        }
+
+        if (this.type === 'medic') {
+            // Move toward nearest damaged friendly
+            let healTarget = null;
+            let minDist = Infinity;
+            game.units.forEach(u => {
+                if (u === this || u.team !== this.team || u.hp >= u.maxHp || u.garrisonedIn) return;
+                const dx = u.x - this.x, dy = u.y - this.y;
+                const d = Math.sqrt(dx*dx+dy*dy);
+                if (d < minDist) { minDist = d; healTarget = u; }
+            });
+            if (healTarget && minDist < 80) {
+                healTarget.hp = Math.min(healTarget.hp + 10 * deltaTime, healTarget.maxHp);
+                this.targetX = this.x; this.targetY = this.y; // stop moving
+            } else if (healTarget) {
+                this.targetX = healTarget.x; this.targetY = healTarget.y;
+            }
+            // Move
+            const hdx = this.targetX - this.x, hdy = this.targetY - this.y;
+            const hdist = Math.sqrt(hdx*hdx+hdy*hdy);
+            if (hdist > 2) {
+                const ang = Math.atan2(hdy, hdx);
+                this.x += Math.cos(ang) * this.speed * deltaTime;
+                this.y += Math.sin(ang) * this.speed * deltaTime;
+            }
+            if (this.attackCooldown > 0) this.attackCooldown -= deltaTime;
             return;
         }
 
@@ -420,6 +533,7 @@ class Unit {
     }
 
     handleCollisions(game) {
+        if (this.isAir) return; // helicopters fly over everything
         // Check collisions with other units
         for (const other of game.units) {
             if (other === this) continue;
@@ -620,6 +734,15 @@ class Unit {
         if (this.attackCooldown <= 0 && this.damage > 0) {
             // Create a projectile instead of instant damage
             const projectile = this.createProjectile(target);
+            projectile.game = game; // needed for AoE
+            // Muzzle flash
+            for (let i = 0; i < 4; i++) {
+                const a = Math.atan2(target.y - this.y, target.x - this.x) + (Math.random()-0.5) * 0.6;
+                const spd = 1.5 + Math.random() * 2;
+                const fp = new Particle(this.x, this.y, '#FFFDE7', 2 + Math.random()*2, Math.cos(a)*spd, Math.sin(a)*spd);
+                fp.decay = 0.2;
+                game.particles.push(fp);
+            }
             game.projectiles.push(projectile);
             this.attackCooldown = this.attackSpeed;
         }
@@ -647,6 +770,11 @@ class Unit {
             speed = 600;
             size = 2;
             color = '#00FFFF';
+        } else if (this.type === 'mortar') {
+            projectileType = 'mortar_shell';
+            speed = 180;
+            size = 7;
+            color = '#FF6F00';
         }
 
         return new Projectile(
@@ -781,6 +909,73 @@ class Unit {
 
             ctx.restore();
 
+        } else if (this.type === 'helicopter') {
+            // Shadow on ground
+            ctx.save();
+            ctx.globalAlpha = 0.25;
+            ctx.fillStyle = '#000';
+            ctx.beginPath();
+            ctx.ellipse(screenX, screenY + this.size * 1.6, this.size * 1.4, this.size * 0.5, 0, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.restore();
+            // Body
+            ctx.fillStyle = this.team === 'player' ? this.color : '#ef5350';
+            ctx.fillRect(screenX - this.size * 0.6, screenY - this.size * 0.3, this.size * 1.2, this.size * 0.6);
+            // Tail boom
+            ctx.fillRect(screenX - this.size * 1.4, screenY - this.size * 0.1, this.size * 0.8, this.size * 0.2);
+            // Rotor (spinning line)
+            ctx.save();
+            ctx.translate(screenX, screenY - this.size * 0.2);
+            ctx.rotate(Date.now() / 60);
+            ctx.strokeStyle = '#CFD8DC';
+            ctx.lineWidth = 2;
+            ctx.beginPath();
+            ctx.moveTo(-this.size * 1.4, 0);
+            ctx.lineTo(this.size * 1.4, 0);
+            ctx.stroke();
+            ctx.beginPath();
+            ctx.moveTo(0, -this.size * 1.4);
+            ctx.lineTo(0, this.size * 1.4);
+            ctx.stroke();
+            ctx.restore();
+        } else if (this.type === 'apc') {
+            // APC body
+            ctx.fillStyle = this.team === 'player' ? this.color : '#ef5350';
+            ctx.fillRect(screenX - this.size, screenY - this.size * 0.55, this.size * 2, this.size * 1.1);
+            // Hatches
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(screenX - this.size * 0.6, screenY - this.size * 0.35, this.size * 0.4, this.size * 0.4);
+            ctx.fillRect(screenX + this.size * 0.2, screenY - this.size * 0.35, this.size * 0.4, this.size * 0.4);
+            // MG on top
+            ctx.fillStyle = '#263238';
+            ctx.fillRect(screenX - this.size * 0.1, screenY - this.size * 0.7, this.size * 0.2, this.size * 0.4);
+            ctx.fillRect(screenX, screenY - this.size * 0.6, this.size * 0.6, this.size * 0.12);
+        } else if (this.type === 'mortar') {
+            // Two-person crew base
+            ctx.fillStyle = this.team === 'player' ? this.color : '#ef5350';
+            ctx.fillRect(screenX - this.size * 0.7, screenY, this.size * 1.4, this.size * 0.5);
+            // Mortar tube (angled)
+            ctx.save();
+            ctx.translate(screenX, screenY);
+            ctx.rotate(-Math.PI / 3.5);
+            ctx.fillStyle = '#5D4037';
+            ctx.fillRect(-this.size * 0.1, -this.size * 1.2, this.size * 0.22, this.size * 1.2);
+            ctx.restore();
+            // Crew dots
+            ctx.fillStyle = '#4CAF50';
+            ctx.beginPath(); ctx.arc(screenX - this.size * 0.4, screenY - this.size * 0.2, this.size * 0.3, 0, Math.PI*2); ctx.fill();
+            ctx.beginPath(); ctx.arc(screenX + this.size * 0.4, screenY - this.size * 0.2, this.size * 0.3, 0, Math.PI*2); ctx.fill();
+        } else if (this.type === 'medic') {
+            // White body
+            ctx.fillStyle = '#FFFFFF';
+            ctx.beginPath();
+            ctx.arc(screenX, screenY - this.size / 3, this.size / 3, 0, Math.PI * 2);
+            ctx.fill();
+            ctx.fillRect(screenX - this.size / 3, screenY - this.size / 6, this.size * 2 / 3, this.size * 2 / 3);
+            // Red cross
+            ctx.fillStyle = '#F44336';
+            ctx.fillRect(screenX - this.size * 0.08, screenY - this.size * 0.35, this.size * 0.16, this.size * 0.5);
+            ctx.fillRect(screenX - this.size * 0.22, screenY - this.size * 0.22, this.size * 0.44, this.size * 0.16);
         } else {
             // Default circle for other units
             ctx.beginPath();
@@ -2453,12 +2648,17 @@ class GameAI {
         const maxU = this.cfg.maxUnits;
 
         const unitTypes = this.cfg.unitTypes || ['soldier'];
-        const canFactory = unitTypes.some(t => ['tank', 'sniper', 'artillery', 'commando'].includes(t));
-        const factoryTypes = unitTypes.filter(t => ['tank', 'sniper', 'artillery', 'commando'].includes(t));
-        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350 };
+        const canFactory = unitTypes.some(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter'].includes(t));
+        const factoryTypes = unitTypes.filter(t => ['tank', 'sniper', 'artillery', 'commando', 'helicopter'].includes(t));
+        const unitCosts = { soldier: 100, tank: 300, sniper: 250, artillery: 400, commando: 350, helicopter: 800, mortar: 350 };
 
         if (barracks && unitTypes.includes('soldier') && this.credits >= 100 && combatUnits.length < maxU) {
             this.produceUnit('soldier', barracks, 100);
+        }
+
+        // Occasionally produce mortar teams from barracks
+        if (barracks && combatUnits.length < maxU && this.credits >= 350 && Math.random() < 0.3) {
+            this.produceUnit('mortar', barracks, 350);
         }
 
         if (factory && combatUnits.length < maxU && factoryTypes.length > 0) {
@@ -2745,6 +2945,8 @@ class Game {
         this.particles = [];
         this.nukes = [];
         this.shockwaves = [];
+        this.screenShake = { x: 0, y: 0, intensity: 0, duration: 0 };
+        this.smokeTimer = 0;
         this.resources = {
             credits: 2000,
             power: 0,
@@ -3155,7 +3357,11 @@ class Game {
                 'sniper': 'factory',
                 'artillery': 'factory',
                 'commando': 'factory',
-                'harvester': 'hq' // Can be produced from HQ
+                'harvester': 'hq', // Can be produced from HQ
+                'helicopter': 'factory',
+                'apc': 'factory',
+                'mortar': 'barracks',
+                'medic': 'barracks'
             };
 
             const requiredBuilding = requirements[type];
@@ -3301,6 +3507,16 @@ class Game {
             return;
         }
 
+        if (this.screenShake.duration > 0) {
+            this.screenShake.duration -= deltaTime;
+            const i = this.screenShake.intensity;
+            this.screenShake.x = (Math.random() - 0.5) * i * 2;
+            this.screenShake.y = (Math.random() - 0.5) * i * 2;
+            if (this.screenShake.duration <= 0) {
+                this.screenShake.x = 0; this.screenShake.y = 0; this.screenShake.intensity = 0;
+            }
+        }
+
         this.units.forEach(unit => {
             unit.update(deltaTime, this);
         });
@@ -3316,6 +3532,40 @@ class Game {
         this.particles.forEach(particle => {
             particle.update(deltaTime);
         });
+
+        // Smoke from damaged units/buildings
+        this.smokeTimer -= deltaTime;
+        if (this.smokeTimer <= 0) {
+            this.smokeTimer = 0.15;
+            this.units.forEach(u => {
+                if (u.garrisonedIn || u.hp <= 0) return;
+                if (u.hp < u.maxHp * 0.4) {
+                    const grey = Math.floor(60 + Math.random() * 40);
+                    const p = new Particle(u.x + (Math.random()-0.5)*u.size, u.y - u.size,
+                        `rgb(${grey},${grey},${grey})`, 3 + Math.random()*3,
+                        (Math.random()-0.5)*0.4, -0.8 - Math.random()*0.5);
+                    p.decay = 0.012;
+                    this.particles.push(p);
+                }
+            });
+            this.buildings.forEach(b => {
+                if (b.hp <= 0) return;
+                if (b.hp < b.maxHp * 0.4) {
+                    for (let i = 0; i < 2; i++) {
+                        const grey = Math.floor(50 + Math.random() * 50);
+                        const p = new Particle(
+                            b.x + (Math.random()-0.5)*b.width,
+                            b.y - b.height/2,
+                            `rgb(${grey},${grey},${grey})`,
+                            4 + Math.random()*4,
+                            (Math.random()-0.5)*0.5, -1.0 - Math.random()*0.6
+                        );
+                        p.decay = 0.01;
+                        this.particles.push(p);
+                    }
+                }
+            });
+        }
 
         this.ai.update(deltaTime);
 
@@ -3334,7 +3584,11 @@ class Game {
                         harvester: 18,
                         sniper: 13,
                         artillery: 25,
-                        commando: 15
+                        commando: 15,
+                        helicopter: 18,
+                        apc: 22,
+                        mortar: 14,
+                        medic: 12
                     };
                     const unitSize = unitSizes[item.unitType] || 12;
                     const spawnPos = this.findSpawnPosition(item.building, unitSize);
@@ -3856,20 +4110,45 @@ class Game {
         });
     }
 
+    addShake(intensity, duration) {
+        if (intensity > this.screenShake.intensity) {
+            this.screenShake.intensity = intensity;
+            this.screenShake.duration = duration;
+        }
+    }
+
     createExplosion(x, y, size, baseColor) {
-        // Create 15-25 particles for explosion
-        const particleCount = 15 + Math.floor(Math.random() * 10);
-        const colors = ['#FF4500', '#FF6347', '#FFA500', '#FFD700', '#696969'];
+        // Screen shake
+        if (size >= 60) this.addShake(8, 0.3);
+        else if (size >= 20) this.addShake(3, 0.15);
+        else this.addShake(1, 0.08);
 
-        for (let i = 0; i < particleCount; i++) {
-            const angle = (Math.PI * 2 * i) / particleCount + (Math.random() - 0.5);
-            const speed = 2 + Math.random() * 3;
-            const velocityX = Math.cos(angle) * speed;
-            const velocityY = Math.sin(angle) * speed - 2; // Launch upward
-            const particleSize = 2 + Math.random() * 3;
-            const color = colors[Math.floor(Math.random() * colors.length)];
-
-            this.particles.push(new Particle(x, y, color, particleSize, velocityX, velocityY));
+        const count = Math.floor(8 + size * 0.8);
+        // Fireball core
+        for (let i = 0; i < count; i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const spd = 1.5 + Math.random() * 3.5;
+            const col = ['#FF4500','#FF6B00','#FFD700','#FF3300','#FFA500'][Math.floor(Math.random()*5)];
+            const p = new Particle(x, y, col, 3 + Math.random() * (size * 0.15), Math.cos(angle)*spd, Math.sin(angle)*spd - 2);
+            p.decay = 0.025 + Math.random() * 0.02;
+            this.particles.push(p);
+        }
+        // Dark smoke cloud
+        for (let i = 0; i < Math.floor(count * 0.6); i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const spd = 0.3 + Math.random() * 1.2;
+            const grey = Math.floor(30 + Math.random() * 50);
+            const p = new Particle(x, y, `rgb(${grey},${grey},${grey})`, 4 + Math.random() * (size * 0.12), Math.cos(angle)*spd, Math.sin(angle)*spd - 1.5);
+            p.decay = 0.008 + Math.random() * 0.01;
+            this.particles.push(p);
+        }
+        // Flying debris chunks
+        for (let i = 0; i < Math.floor(count * 0.4); i++) {
+            const angle = Math.random() * Math.PI * 2;
+            const spd = 2 + Math.random() * 4;
+            const p = new Particle(x, y, '#5D4037', 2 + Math.random() * 3, Math.cos(angle)*spd, Math.sin(angle)*spd - 3);
+            p.decay = 0.03 + Math.random() * 0.02;
+            this.particles.push(p);
         }
     }
 
@@ -3889,6 +4168,10 @@ class Game {
         const sy = this.canvas.height / this.camera.height;
         this.ctx.save();
         this.ctx.scale(sx, sy);
+
+        if (this.screenShake.intensity > 0) {
+            this.ctx.translate(this.screenShake.x, this.screenShake.y);
+        }
 
         // Richer ground base
         this.ctx.fillStyle = '#3a6b1f';
@@ -4353,7 +4636,10 @@ class Game {
             if (type === 'soldier') {
                 canProduce = hasBarracks;
                 missingBuilding = 'Barracks';
-            } else if (['tank', 'sniper', 'artillery', 'commando'].includes(type)) {
+            } else if (['mortar', 'medic'].includes(type)) {
+                canProduce = hasBarracks;
+                missingBuilding = 'Barracks';
+            } else if (['tank', 'sniper', 'artillery', 'commando', 'helicopter', 'apc'].includes(type)) {
                 canProduce = hasFactory;
                 missingBuilding = 'War Factory';
             } else if (type === 'harvester') {
