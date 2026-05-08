@@ -3105,17 +3105,17 @@ class Game {
 
     setupEventListeners() {
         document.querySelectorAll('.build-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const type = e.target.dataset.type;
-                const cost = parseInt(e.target.dataset.cost);
+            btn.addEventListener('click', () => {
+                const type = btn.dataset.type;
+                const cost = parseInt(btn.dataset.cost);
                 this.enterBuildMode(type, cost);
             });
         });
 
         document.querySelectorAll('.unit-btn').forEach(btn => {
-            btn.addEventListener('click', (e) => {
-                const type = e.target.dataset.type;
-                const cost = parseInt(e.target.dataset.cost);
+            btn.addEventListener('click', () => {
+                const type = btn.dataset.type;
+                const cost = parseInt(btn.dataset.cost);
                 this.produceUnit(type, cost);
             });
         });
@@ -3349,46 +3349,53 @@ class Game {
     }
 
     produceUnit(type, cost) {
-        if (this.resources.credits >= cost) {
-            // Define building requirements for each unit type
-            const requirements = {
-                'soldier': 'barracks',
-                'tank': 'factory',
-                'sniper': 'factory',
-                'artillery': 'factory',
-                'commando': 'factory',
-                'harvester': 'hq', // Can be produced from HQ
-                'helicopter': 'factory',
-                'apc': 'factory',
-                'mortar': 'barracks',
-                'medic': 'barracks'
-            };
+        const infoEl = document.getElementById('selected-info');
+        const requirements = {
+            'soldier': 'barracks',
+            'tank': 'factory',
+            'sniper': 'factory',
+            'artillery': 'factory',
+            'commando': 'factory',
+            'harvester': 'hq',
+            'helicopter': 'factory',
+            'apc': 'factory',
+            'mortar': 'barracks',
+            'medic': 'barracks'
+        };
+        const reqLabels = {
+            'barracks': 'Barracks', 'factory': 'War Factory', 'hq': 'HQ'
+        };
 
-            const requiredBuilding = requirements[type];
-
-            // Find the required building type
-            const productionBuilding = this.buildings.find(b =>
-                b.team === this.playerTeam && b.type === requiredBuilding
-            );
-
-            if (productionBuilding) {
-                // Calculate build time based on cost (cost / 50 = seconds)
-                const buildTime = cost / 50;
-
-                // Add to production queue instead of creating instantly
-                this.productionQueue.push({
-                    itemType: 'unit',
-                    unitType: type,
-                    building: productionBuilding,
-                    timeRemaining: buildTime,
-                    totalTime: buildTime,
-                    cost: cost
-                });
-
-                this.resources.credits -= cost;
-                this.updateUI();
-            }
+        if (this.resources.credits < cost) {
+            infoEl.textContent = `⚠️ Need ${cost - Math.floor(this.resources.credits)} more credits`;
+            infoEl.style.color = '#f44336';
+            setTimeout(() => { infoEl.textContent = ''; infoEl.style.color = '#aaa'; }, 2000);
+            return;
         }
+
+        const requiredBuilding = requirements[type];
+        const productionBuilding = this.buildings.find(b =>
+            b.team === this.playerTeam && b.type === requiredBuilding
+        );
+
+        if (!productionBuilding) {
+            infoEl.textContent = `⚠️ Need a ${reqLabels[requiredBuilding] || requiredBuilding} to produce ${type}`;
+            infoEl.style.color = '#f44336';
+            setTimeout(() => { infoEl.textContent = ''; infoEl.style.color = '#aaa'; }, 2000);
+            return;
+        }
+
+        const buildTime = cost / 50;
+        this.productionQueue.push({
+            itemType: 'unit',
+            unitType: type,
+            building: productionBuilding,
+            timeRemaining: buildTime,
+            totalTime: buildTime,
+            cost: cost
+        });
+        this.resources.credits -= cost;
+        this.updateUI();
     }
 
     setAttackMoveMode() {
