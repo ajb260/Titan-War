@@ -246,6 +246,7 @@ class NukeProjectile {
 
         // Screen shake for nuke
         this.game.addShake(20, 0.6);
+        this.game.sfx.play('bigboom');
 
         // Massive particle burst
         const colors = ['#FF4500', '#FF6347', '#FFA500', '#FFD700', '#FFFFFF', '#FF0000'];
@@ -1021,6 +1022,8 @@ class Unit {
             }
             game.projectiles.push(projectile);
             this.attackCooldown = this.attackSpeed;
+            const fireSound = { tank: 'cannon', artillery: 'artillery', sniper: 'sniper', mortar: 'mortar', bazooka: 'rocket' }[this.type] || 'shot';
+            game.sfx.play(fireSound, this.x, this.y);
         }
     }
 
@@ -1586,6 +1589,7 @@ class Building {
                     );
                     game.projectiles.push(projectile);
                     this.attackCooldown = this.attackSpeed;
+                    game.sfx.play('shot', this.x, this.y);
                 } else if (dist > this.range) {
                     // Target out of range
                     this.target = null;
@@ -1638,6 +1642,7 @@ class Building {
                         game.particles.push(op);
                     }
                     if (this.team === game.playerTeam) game.addRadioMessage('🛰 Nuke intercepted!', '#00E5FF');
+                    game.sfx.play('intercept', target.x, target.y);
                     target.dead = true;
                     this.interceptCooldown = this.maxInterceptCooldown;
                     this.interceptsTotal++;
@@ -1676,6 +1681,7 @@ class Building {
                     const shooter = this.garrison[Math.floor(Math.random() * this.garrison.length)];
                     const dmg = (shooter.damage || 5) * 1.5; // 50% bonus inside building
                     game.projectiles.push(new Projectile(this.x, this.y, enemy, dmg, 450, 3, shooter.color || '#4CAF50', 'garrison_bullet', shooter, game));
+                    game.sfx.play('shot', this.x, this.y);
                     this.garrisonAttackCooldown = (shooter.attackSpeed || 1.0) / this.garrison.length;
                 }
             }
@@ -2724,6 +2730,11 @@ class InputHandler {
             this.game.updateUI();
         }
 
+        if (e.key === 'p' || e.key === 'P') {
+            this.game.togglePause();
+            return;
+        }
+
         if (e.key === 's' || e.key === 'S') {
             this.game.stopSelectedUnits();
         }
@@ -3048,7 +3059,7 @@ class GameAI {
 
         const combatUnits = this.game.units.filter(u => u.team === this.team && u.type !== 'harvester');
         const [lo, mid, hi] = this.cfg.attackIntervals;
-        const attackInterval = combatUnits.length >= 12 ? hi : combatUnits.length >= 6 ? mid : lo;
+        const attackInterval = (combatUnits.length >= 12 ? hi : combatUnits.length >= 6 ? mid : lo) * this.game.diff().aiAttack;
         if (this.attackTimer >= attackInterval) {
             this.attackTimer = 0;
             this.launchAttack();
@@ -3065,7 +3076,7 @@ class GameAI {
             this.tryLaunchNuke();
         }
 
-        this.credits += deltaTime * this.cfg.incomeRate;
+        this.credits += deltaTime * this.cfg.incomeRate * this.game.diff().aiIncome;
     }
 
     makeDecisions() {
@@ -3141,6 +3152,7 @@ class GameAI {
             const tempUnit = createUnit(type, 0, 0, this.team);
             const spawnPos = this.game.findSpawnPosition(building, tempUnit.size);
             const unit = createUnit(type, spawnPos.x, spawnPos.y, this.team);
+            this.game.applyEnemyDifficulty(unit);
             this.game.units.push(unit);
             this.credits -= cost;
         }
@@ -3237,6 +3249,8 @@ class GameAI {
         const tx = target.x + (Math.random() - 0.5) * 80;
         const ty = target.y + (Math.random() - 0.5) * 80;
         this.game.nukes.push(new NukeProjectile(silo.x, silo.y, tx, ty, this.game, this.team));
+        this.game.sfx.play('launch');
+        this.game.addRadioMessage('☢ ENEMY NUKE LAUNCHED!', '#FF1744');
         silo.nukeCooldown = silo.maxNukeCooldown;
     }
 }
@@ -4123,6 +4137,225 @@ class City {
     }
 }
 
+// ========== DIFFICULTY ==========
+// base: what the player starts with. The multipliers tune the enemy and the raid timer.
+const DIFFICULTIES = {
+    easy: {
+        label: 'Easy', color: '#4CAF50',
+        desc: 'You start with every building and one of every unit. Enemy earns a little less.',
+        base: 'full', playerCredits: 1.2, aiIncome: 0.85, aiAttack: 1.15, enemyHp: 1.0, raidDelay: 1.25
+    },
+    normal: {
+        label: 'Normal', color: '#FFC107',
+        desc: 'A small working base: barracks, war factory, power and a turret, plus a few units.',
+        base: 'standard', playerCredits: 1.0, aiIncome: 1.0, aiAttack: 1.0, enemyHp: 1.0, raidDelay: 1.0
+    },
+    hard: {
+        label: 'Hard', color: '#F44336',
+        desc: 'Just an HQ, a refinery and two soldiers. The enemy is richer, tougher and attacks sooner.',
+        base: 'minimal', playerCredits: 0.8, aiIncome: 1.35, aiAttack: 0.8, enemyHp: 1.2, raidDelay: 0.75
+    }
+};
+
+// Small localStorage helpers that never throw (private mode / blocked storage)
+function loadSetting(key, fallback) {
+    try { const v = localStorage.getItem(key); return v === null ? fallback : JSON.parse(v); } catch (e) { return fallback; }
+}
+function saveSetting(key, value) {
+    try { localStorage.setItem(key, JSON.stringify(value)); } catch (e) { /* ignore */ }
+}
+
+// ========== SOUND ==========
+// Every sound is synthesised with the Web Audio API, so there are no audio files.
+// Battle sounds are positional: quieter when far from the camera, panned left/right.
+class SoundFX {
+    constructor(game) {
+        this.game = game;
+        this.ctx = null;
+        this.enabled = loadSetting('titanwar_sound', true);
+        this.musicOn = loadSetting('titanwar_music', true);
+        this.lastPlayed = {};
+        // Minimum seconds between repeats of the same sound, so big fights don't turn to noise
+        this.throttle = { shot: 0.045, sniper: 0.08, cannon: 0.07, artillery: 0.1, rocket: 0.09, mortar: 0.1,
+                          explosion: 0.05, radio: 0.8, ready: 0.15, built: 0.3, intercept: 0.3, launch: 1, bigboom: 1 };
+        // Browsers only allow audio after the player interacts with the page
+        const unlock = () => this.ensure();
+        window.addEventListener('pointerdown', unlock);
+        window.addEventListener('keydown', unlock);
+    }
+
+    ensure() {
+        if (!this.ctx) {
+            const AC = window.AudioContext || window.webkitAudioContext;
+            if (!AC) return null;
+            const ctx = this.ctx = new AC();
+            this.master = ctx.createGain();
+            this.master.gain.value = 0.55;
+            this.master.connect(ctx.destination);
+            this.sfxBus = ctx.createGain();
+            this.sfxBus.gain.value = this.enabled ? 1 : 0;
+            this.sfxBus.connect(this.master);
+            this.musicBus = ctx.createGain();
+            this.musicBus.gain.value = this.musicOn ? 0.16 : 0;
+            this.musicBus.connect(this.master);
+            // One second of white noise, reused for every gunshot/explosion
+            const len = ctx.sampleRate;
+            this.noiseBuf = ctx.createBuffer(1, len, ctx.sampleRate);
+            const d = this.noiseBuf.getChannelData(0);
+            for (let i = 0; i < len; i++) d[i] = Math.random() * 2 - 1;
+            this.startMusic();
+        }
+        if (this.ctx.state === 'suspended') this.ctx.resume();
+        return this.ctx;
+    }
+
+    setEnabled(on) {
+        this.enabled = on;
+        saveSetting('titanwar_sound', on);
+        if (this.sfxBus) this.sfxBus.gain.value = on ? 1 : 0;
+    }
+
+    setMusic(on) {
+        this.musicOn = on;
+        saveSetting('titanwar_music', on);
+        this.updateMusicVolume();
+    }
+
+    updateMusicVolume() {
+        if (!this.musicBus) return;
+        const target = !this.musicOn ? 0 : this.game.paused ? 0.06 : 0.16;
+        this.musicBus.gain.setTargetAtTime(target, this.ctx.currentTime, 0.15);
+    }
+
+    // ---- building blocks ----
+    noise(dest, t, dur, type, f0, f1, peak) {
+        const ctx = this.ctx;
+        const src = ctx.createBufferSource();
+        src.buffer = this.noiseBuf;
+        const filt = ctx.createBiquadFilter();
+        filt.type = type;
+        filt.frequency.setValueAtTime(f0, t);
+        filt.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(peak, t + 0.005);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        src.connect(filt); filt.connect(g); g.connect(dest);
+        src.start(t, Math.random() * 0.5);
+        src.stop(t + dur + 0.05);
+    }
+
+    tone(dest, t, dur, type, f0, f1, peak, attack = 0.005) {
+        const ctx = this.ctx;
+        const osc = ctx.createOscillator();
+        osc.type = type;
+        osc.frequency.setValueAtTime(f0, t);
+        if (f1 !== f0) osc.frequency.exponentialRampToValueAtTime(Math.max(20, f1), t + dur);
+        const g = ctx.createGain();
+        g.gain.setValueAtTime(0.0001, t);
+        g.gain.exponentialRampToValueAtTime(peak, t + attack);
+        g.gain.exponentialRampToValueAtTime(0.0001, t + dur);
+        osc.connect(g); g.connect(dest);
+        osc.start(t);
+        osc.stop(t + dur + 0.05);
+    }
+
+    // Play a named sound. (x, y) = world position for distance fade + stereo pan; omit for UI sounds.
+    play(name, x, y, size = 20) {
+        if (!this.enabled || !this.ctx || this.ctx.state !== 'running') return;
+        const now = this.ctx.currentTime;
+        const gap = this.throttle[name] || 0.05;
+        if (this.lastPlayed[name] && now - this.lastPlayed[name] < gap) return;
+
+        let vol = 1, pan = 0;
+        if (x !== undefined) {
+            const cam = this.game.camera;
+            const cx = cam.x + cam.width / 2, cy = cam.y + cam.height / 2;
+            const dist = Math.hypot(x - cx, y - cy);
+            vol = Math.pow(Math.max(0, 1 - dist / 1500), 1.6);
+            if (vol < 0.04) return;
+            pan = Math.max(-1, Math.min(1, (x - cx) / (cam.width / 2))) * 0.7;
+        }
+        this.lastPlayed[name] = now;
+
+        const out = this.ctx.createGain();
+        out.gain.value = vol;
+        let dest = out;
+        if (this.ctx.createStereoPanner) {
+            const p = this.ctx.createStereoPanner();
+            p.pan.value = pan;
+            out.connect(p); p.connect(this.sfxBus);
+        } else {
+            out.connect(this.sfxBus);
+        }
+        setTimeout(() => { try { out.disconnect(); } catch (e) {} }, 4000);
+
+        const t = now + 0.005;
+        switch (name) {
+            case 'shot':      this.noise(dest, t, 0.07, 'highpass', 2200, 1200, 0.22); break;
+            case 'sniper':    this.noise(dest, t, 0.16, 'bandpass', 3000, 900, 0.5);
+                              this.tone(dest, t, 0.06, 'square', 1200, 200, 0.06); break;
+            case 'cannon':    this.noise(dest, t, 0.35, 'lowpass', 1400, 120, 0.55);
+                              this.tone(dest, t, 0.3, 'sine', 140, 45, 0.45); break;
+            case 'artillery': this.noise(dest, t, 0.6, 'lowpass', 900, 60, 0.7);
+                              this.tone(dest, t, 0.5, 'sine', 100, 30, 0.6); break;
+            case 'rocket':    this.noise(dest, t, 0.45, 'bandpass', 500, 2400, 0.3); break;
+            case 'mortar':    this.tone(dest, t, 0.22, 'sine', 650, 260, 0.25);
+                              this.noise(dest, t, 0.1, 'lowpass', 800, 300, 0.15); break;
+            case 'explosion': {
+                const big = Math.min(1, size / 70);
+                this.noise(dest, t, 0.35 + big * 0.6, 'lowpass', 1600 - big * 600, 60, 0.45 + big * 0.4);
+                this.tone(dest, t, 0.3 + big * 0.5, 'sine', 90, 28, 0.35 + big * 0.35);
+                break;
+            }
+            case 'bigboom':   this.noise(dest, t, 2.8, 'lowpass', 700, 30, 0.95);
+                              this.tone(dest, t, 2.2, 'sine', 70, 18, 0.9);
+                              this.noise(dest, t + 0.05, 0.6, 'highpass', 3000, 800, 0.3); break;
+            case 'launch':    this.noise(dest, t, 1.6, 'bandpass', 180, 1600, 0.45);
+                              this.tone(dest, t, 1.4, 'sawtooth', 80, 220, 0.08, 0.3); break;
+            case 'intercept': this.tone(dest, t, 0.35, 'sawtooth', 1800, 250, 0.12);
+                              this.noise(dest, t + 0.05, 0.4, 'lowpass', 2000, 200, 0.4); break;
+            case 'ready':     this.tone(dest, t, 0.09, 'square', 660, 660, 0.07);
+                              this.tone(dest, t + 0.1, 0.12, 'square', 990, 990, 0.07); break;
+            case 'built':     [523, 659, 784].forEach((f, i) => this.tone(dest, t + i * 0.09, 0.16, 'triangle', f, f, 0.16)); break;
+            case 'radio':     this.tone(dest, t, 0.05, 'square', 1400, 1400, 0.04);
+                              this.noise(dest, t + 0.05, 0.12, 'bandpass', 2000, 1500, 0.06); break;
+        }
+    }
+
+    // ---- background music: a low, steady march loop (bass, kick, soft pad) ----
+    startMusic() {
+        const ctx = this.ctx;
+        const bpm = 92, beat = 60 / bpm;
+        // A minor: i - VI - III - VII  (A, F, C, G)
+        const bassRoots = [55, 43.65, 65.41, 49];
+        const pads = [[220, 261.6, 329.6], [174.6, 220, 261.6], [261.6, 329.6, 392], [196, 246.9, 293.7]];
+        let step = 0;
+        let nextTime = ctx.currentTime + 0.1;
+        const schedule = () => {
+            while (nextTime < ctx.currentTime + 0.4) {
+                const bar = Math.floor(step / 8) % 4;
+                const inBar = step % 8;            // eighth notes
+                const t = nextTime;
+                // Kick on beats 1 and 3, soft snare on 2 and 4
+                if (inBar % 4 === 0) this.tone(this.musicBus, t, 0.25, 'sine', 120, 40, 0.9);
+                if (inBar % 4 === 2) this.noise(this.musicBus, t, 0.12, 'bandpass', 1800, 900, 0.25);
+                // Driving bass on eighths
+                const root = bassRoots[bar];
+                this.tone(this.musicBus, t, beat * 0.45, 'sawtooth', inBar === 7 ? root * 1.5 : root, inBar === 7 ? root * 1.5 : root, 0.22);
+                // Pad chord at the top of each bar
+                if (inBar === 0) {
+                    pads[bar].forEach(f => this.tone(this.musicBus, t, beat * 4, 'triangle', f, f, 0.06, 0.4));
+                }
+                nextTime += beat / 2;
+                step++;
+            }
+        };
+        this.musicTimer = setInterval(schedule, 100);
+        schedule();
+    }
+}
+
 // ========== MAIN GAME ==========
 class Game {
     constructor() {
@@ -4158,6 +4391,9 @@ class Game {
         this.orderMarkers = [];  // brief click-feedback rings for move/attack orders
         this.cities = [];        // neutral towns the player must protect
         this.revealWholeMap = true; // no fog of war for the player (set false to bring it back)
+        this.paused = false;        // P key / Pause button
+        this.difficulty = DIFFICULTIES[loadSetting('titanwar_difficulty', 'easy')] ? loadSetting('titanwar_difficulty', 'easy') : 'easy';
+        this.sfx = new SoundFX(this);
         this.controlGroups = {}; // '1'..'9' -> array of units
         this.uiRefreshTimer = 0; // throttled live refresh of credits / queue / buttons
         this.resources = {
@@ -4221,7 +4457,8 @@ class Game {
         const playerCredits = mission ? mission.playerCredits : 2000;
         const enemyCredits = mission ? mission.enemyCredits : 1000;
 
-        this.resources.credits = playerCredits;
+        const diff = this.diff();
+        this.resources.credits = Math.round(playerCredits * diff.playerCredits);
 
         const hq = createBuilding('hq', 200, 200, this.playerTeam);
         this.buildings.push(hq);
@@ -4229,35 +4466,50 @@ class Game {
         const refinery = createBuilding('refinery', 350, 250, this.playerTeam);
         this.buildings.push(refinery);
 
-        // The player starts with a full base: every building type is already built,
-        // so every unit and ability is unlocked from the first second.
-        const startBase = [
-            ['power',        80,  90],
-            ['missile_silo', 360, 110],
-            ['aa_battery',   480, 160],
-            ['barracks',     90,  330],
-            ['factory',      230, 365],
-            ['turret',       490, 330],
-            ['turret',       340, 470],
-            ['sandbag',      540, 290],
-            ['sandbag',      390, 525]
-        ];
-        startBase.forEach(([type, x, y]) => {
+        // What the player starts with depends on the difficulty:
+        //   Easy     -> every building type + one of every unit
+        //   Normal   -> a small working base and a few units
+        //   Hard     -> just the HQ, refinery, two soldiers and a harvester
+        const startBases = {
+            full: [
+                ['power',        80,  90],
+                ['missile_silo', 360, 110],
+                ['aa_battery',   480, 160],
+                ['barracks',     90,  330],
+                ['factory',      230, 365],
+                ['turret',       490, 330],
+                ['turret',       340, 470],
+                ['sandbag',      540, 290],
+                ['sandbag',      390, 525]
+            ],
+            standard: [
+                ['power',    80,  90],
+                ['barracks', 90,  330],
+                ['factory',  230, 365],
+                ['turret',   490, 330]
+            ],
+            minimal: []
+        };
+        const startUnits = {
+            full: ['tank', 'sniper', 'artillery', 'commando', 'bazooka', 'general',
+                   'helicopter', 'medic', 'mortar', 'apc'],
+            standard: ['tank', 'sniper', 'medic'],
+            minimal: []
+        };
+        (startBases[diff.base] || []).forEach(([type, x, y]) => {
             const b = createBuilding(type, x, y, this.playerTeam);
             // The silo starts charging so missions can't be won with an instant nuke
             if (type === 'missile_silo') b.nukeCooldown = b.maxNukeCooldown;
             this.buildings.push(b);
         });
 
-        // ...and one of every unit in the game (plus the usual starting soldiers & harvester)
         this.units.push(createUnit('soldier', 250, 250, this.playerTeam));
         this.units.push(createUnit('soldier', 280, 250, this.playerTeam));
         this.units.push(createUnit('harvester', 300, 280, this.playerTeam));
-        const hqForSpawn = { x: 640, y: 200, width: 0, height: 0 }; // open rally ground east of the base
-        ['tank', 'sniper', 'artillery', 'commando', 'bazooka', 'general',
-         'helicopter', 'medic', 'mortar', 'apc'].forEach(type => {
+        const rally = { x: 640, y: 200, width: 0, height: 0 }; // open rally ground east of the base
+        (startUnits[diff.base] || []).forEach(type => {
             const size = createUnit(type, 0, 0, this.playerTeam).size;
-            const pos = this.findSpawnPosition(hqForSpawn, size);
+            const pos = this.findSpawnPosition(rally, size);
             this.units.push(createUnit(type, pos.x, pos.y, this.playerTeam));
         });
 
@@ -4288,6 +4540,7 @@ class Game {
             this.ai.credits = enemyCredits;
             this.ai.missionConfig = mission.ai || null;
         }
+        this.units.forEach(u => { if (u.team === this.enemyTeam) this.applyEnemyDifficulty(u); });
 
         this.initCities();
 
@@ -4324,7 +4577,7 @@ class Game {
         this.cities = CITY_SITES.slice(0, count).map(site => new City(site));
         // Grace period before the enemy starts raiding towns: time to get defences out
         this.missionTime = 0;
-        this.raidDelay = Math.max(60, 150 - id * 6);
+        this.raidDelay = Math.max(45, (150 - id * 6) * this.diff().raidDelay);
         this.raidWarned = false;
     }
 
@@ -4493,6 +4746,17 @@ class Game {
             });
         }
         this.updateFogButtons();
+
+        // Pause / sound / music buttons in the side panel
+        const wire = (id, fn) => {
+            const b = document.getElementById(id);
+            if (b) b.addEventListener('click', () => { fn(); b.blur(); });
+        };
+        wire('pause-btn', () => this.togglePause());
+        wire('sound-btn', () => this.toggleSound());
+        wire('music-btn', () => this.toggleMusic());
+        this.updateSoundButtons();
+        this.updatePauseButton();
 
         const campaignBtn = document.getElementById('campaign-btn');
         if (campaignBtn) {
@@ -5376,6 +5640,7 @@ class Game {
                         this.playerTeam
                     );
                     this.units.push(unit);
+                    this.sfx.play('ready');
                 } else if (item.itemType === 'building') {
                     const building = createBuilding(
                         item.buildingType,
@@ -5384,6 +5649,7 @@ class Game {
                         this.playerTeam
                     );
                     this.buildings.push(building);
+                    this.sfx.play('built');
                 }
 
                 // Remove from queue
@@ -5449,41 +5715,7 @@ class Game {
             if (d.amount < d.maxAmount) d.amount = Math.min(d.maxAmount, d.amount + 8 * deltaTime);
         });
 
-        // Edge scrolling — runs every frame so the camera moves continuously
-        if (!this.input.cameraDragging && this.input.mouseOnCanvas) {
-            const edgeSize = 50;
-            const maxSpeed = 800; // world-units per second at full edge depth
-            const mx = this.input.mouseX;
-            const my = this.input.mouseY;
-            if (!document.hidden) {
-                if (mx < edgeSize) {
-                    this.camera.x -= maxSpeed * ((edgeSize - mx) / edgeSize) * deltaTime;
-                }
-                if (mx > this.camera.width - edgeSize) {
-                    this.camera.x += maxSpeed * ((mx - (this.camera.width - edgeSize)) / edgeSize) * deltaTime;
-                }
-                if (my < edgeSize) {
-                    this.camera.y -= maxSpeed * ((edgeSize - my) / edgeSize) * deltaTime;
-                }
-                if (my > this.camera.height - edgeSize) {
-                    this.camera.y += maxSpeed * ((my - (this.camera.height - edgeSize)) / edgeSize) * deltaTime;
-                }
-                this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
-                this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
-            }
-        }
-
-        // Smooth arrow-key scrolling while keys are held
-        const keys = this.input.keysDown;
-        if (keys.size > 0) {
-            const kSpeed = 700 * deltaTime;
-            if (keys.has('ArrowLeft'))  this.camera.x -= kSpeed;
-            if (keys.has('ArrowRight')) this.camera.x += kSpeed;
-            if (keys.has('ArrowUp'))    this.camera.y -= kSpeed;
-            if (keys.has('ArrowDown'))  this.camera.y += kSpeed;
-            this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
-            this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
-        }
+        this.updateCamera(deltaTime);
 
         // Live HUD refresh (credits drain from repairs, queue progress bars, button affordability)
         this.uiRefreshTimer -= deltaTime;
@@ -5764,6 +5996,8 @@ class Game {
 
         // Reset game state
         this.gameState = 'playing';
+        this.paused = false;
+        this.updatePauseButton();
         this.units = [];
         this.buildings = [];
         this.projectiles = [];
@@ -5794,6 +6028,50 @@ class Game {
 
         // Reset camera to player base
         this.goToBase();
+    }
+
+    diff() {
+        return DIFFICULTIES[this.difficulty] || DIFFICULTIES.easy;
+    }
+
+    setDifficulty(key) {
+        if (!DIFFICULTIES[key]) return;
+        this.difficulty = key;
+        saveSetting('titanwar_difficulty', key);
+        // Redraw the campaign menu so the selection shows
+        if (document.getElementById('campaign-overlay')) this.showCampaignScreen();
+    }
+
+    // Tougher enemies on harder settings (more HP, same everything else)
+    applyEnemyDifficulty(u) {
+        const m = this.diff().enemyHp;
+        if (m === 1 || u._diffApplied) return;
+        u.maxHp = Math.round(u.maxHp * m);
+        u.hp = u.maxHp;
+        u._diffApplied = true;
+    }
+
+    toggleSound() {
+        this.sfx.ensure();
+        this.sfx.setEnabled(!this.sfx.enabled);
+        this.updateSoundButtons();
+    }
+
+    toggleMusic() {
+        this.sfx.ensure();
+        this.sfx.setMusic(!this.sfx.musicOn);
+        this.updateSoundButtons();
+    }
+
+    updateSoundButtons() {
+        const set = (id, on, onText, offText) => {
+            const b = document.getElementById(id);
+            if (!b) return;
+            b.textContent = on ? onText : offText;
+            b.style.background = on ? '#1565C0' : '#37474F';
+        };
+        ['sound-btn', 'campaign-sound-btn'].forEach(id => set(id, this.sfx.enabled, '🔊 Sound: ON', '🔇 Sound: OFF'));
+        ['music-btn', 'campaign-music-btn'].forEach(id => set(id, this.sfx.musicOn, '🎵 Music: ON', '🎵 Music: OFF'));
     }
 
     // Switch fog of war on/off for the player and refresh every fog button
@@ -5863,9 +6141,16 @@ class Game {
         overlay.innerHTML = `
             <div style="text-align:center;max-width:min(900px,90vw);width:90%;">
                 <h1 style="color:#FF5722;font-size:clamp(32px,6vmin,80px);margin:0 0 clamp(4px,0.8vmin,12px);text-shadow:0 0 16px #FF5722;">TITAN WAR</h1>
-                <p style="color:#888;font-size:clamp(11px,1.5vmin,20px);margin:0 0 clamp(16px,3vmin,40px);letter-spacing:2px;">CAMPAIGN</p>
+                <p style="color:#888;font-size:clamp(11px,1.5vmin,20px);margin:0 0 clamp(8px,1.5vmin,20px);letter-spacing:2px;">CAMPAIGN</p>
+                <div style="margin:0 0 clamp(14px,2.5vmin,32px);">
+                    <span style="color:#aaa;font-size:clamp(12px,1.5vmin,18px);margin-right:8px;">Difficulty:</span>
+                    ${Object.entries(DIFFICULTIES).map(([key, d]) => `<button onclick="window._game.setDifficulty('${key}')" style="background:${this.difficulty === key ? d.color : '#263238'};color:${this.difficulty === key ? '#000' : '#ccc'};border:2px solid ${d.color};font-weight:bold;padding:clamp(5px,0.8vmin,10px) clamp(12px,2vw,24px);font-size:clamp(12px,1.5vmin,18px);border-radius:4px;cursor:pointer;margin:0 4px;width:auto;">${d.label}</button>`).join('')}
+                    <div style="color:#bbb;font-size:clamp(11px,1.3vmin,16px);margin-top:8px;">${this.diff().desc}${this.pausedFromBattle ? ' <span style="color:#FFB74D;">(applies to the next mission you start)</span>' : ''}</div>
+                </div>
                 <div style="display:flex;flex-wrap:wrap;justify-content:center;">${missionCards}</div>
                 ${this.pausedFromBattle ? `<button onclick="window._game.resumeBattle()" style="margin-top:clamp(14px,2.5vmin,32px);margin-right:10px;background:#1B5E20;color:#fff;border:1px solid #4CAF50;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">⟵ Back to Battle</button>` : ''}
+                <button id="campaign-sound-btn" onclick="window._game.toggleSound()" style="margin-top:clamp(14px,2.5vmin,32px);margin-right:10px;background:#1565C0;color:#fff;border:1px solid #607D8B;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">🔊 Sound</button>
+                <button id="campaign-music-btn" onclick="window._game.toggleMusic()" style="margin-top:clamp(14px,2.5vmin,32px);margin-right:10px;background:#1565C0;color:#fff;border:1px solid #607D8B;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">🎵 Music</button>
                 <button id="campaign-fog-btn" onclick="window._game.toggleFog()" style="margin-top:clamp(14px,2.5vmin,32px);margin-right:10px;background:#37474F;color:#fff;border:1px solid #607D8B;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">🌫 Fog of War</button>
                 <button onclick="window._game.startMission(1)" style="margin-top:clamp(14px,2.5vmin,32px);background:#263238;color:#aaa;border:1px solid #444;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">Quick Start (Mission 1)</button>
             </div>`;
@@ -5873,6 +6158,7 @@ class Game {
         document.body.appendChild(overlay);
         window._game = this;
         this.updateFogButtons();
+        this.updateSoundButtons();
     }
 
     startMission(missionId) {
@@ -5887,6 +6173,9 @@ class Game {
         this.currentMission = mission;
         this.gameState = 'playing';
         this.pausedFromBattle = false;
+        this.paused = false;
+        this.updatePauseButton();
+        if (this.sfx) this.sfx.updateMusicVolume();
         this.units = [];
         this.buildings = [];
         this.projectiles = [];
@@ -5946,6 +6235,7 @@ class Game {
         this.resources.credits -= this.nukeCost;
         silo.nukeCooldown = silo.maxNukeCooldown;
         this.nukes.push(new NukeProjectile(silo.x, silo.y, worldX, worldY, this, this.playerTeam));
+        this.sfx.play('launch');
         this.nukeTargeting = false;
         this.canvas.style.cursor = 'crosshair';
         this.updateUI();
@@ -6014,11 +6304,13 @@ class Game {
 
     addRadioMessage(text, color = '#FFD700') {
         if (this.radioMessages.length > 0 && this.radioMessages[0].text === text) return;
+        if (this.sfx) this.sfx.play('radio');
         this.radioMessages.unshift({ text, timer: 3.5, maxTimer: 3.5, color });
         if (this.radioMessages.length > 4) this.radioMessages.pop();
     }
 
     createExplosion(x, y, size, baseColor, leaveCrater = true) {
+        this.sfx.play('explosion', x, y, size);
         // Screen shake — only for blasts the player can actually see
         const onScreen = x > this.camera.x - 100 && x < this.camera.x + this.camera.width + 100 &&
                          y > this.camera.y - 100 && y < this.camera.y + this.camera.height + 100;
@@ -6333,6 +6625,21 @@ class Game {
                     : l.c.population < l.c.initialPop * 0.5 ? '#FFB74D' : '#C8E6C9';
                 this.ctx.fillText(l.text, 18, py + lineH * (i + 2));
             });
+            this.ctx.restore();
+        }
+
+        if (this.paused && this.gameState === 'playing') {
+            const cw = this.canvas.width, ch = this.canvas.height;
+            this.ctx.save();
+            this.ctx.fillStyle = 'rgba(0,0,0,0.35)';
+            this.ctx.fillRect(0, 0, cw, ch);
+            this.ctx.textAlign = 'center';
+            this.ctx.fillStyle = '#FFFFFF';
+            this.ctx.font = `bold ${Math.floor(ch * 0.09)}px Arial`;
+            this.ctx.fillText('PAUSED', cw / 2, ch * 0.45);
+            this.ctx.font = `${Math.floor(ch * 0.03)}px Arial`;
+            this.ctx.fillStyle = '#CFD8DC';
+            this.ctx.fillText('Press P to resume — you can still look around and give orders', cw / 2, ch * 0.45 + ch * 0.06);
             this.ctx.restore();
         }
 
@@ -6806,11 +7113,69 @@ class Game {
         this.updateRepairUI();
     }
 
+    // Camera scrolling (mouse at screen edge + arrow keys). Runs even while paused.
+    updateCamera(deltaTime) {
+        // Edge scrolling — runs every frame so the camera moves continuously
+        if (!this.input.cameraDragging && this.input.mouseOnCanvas) {
+            const edgeSize = 50;
+            const maxSpeed = 800; // world-units per second at full edge depth
+            const mx = this.input.mouseX;
+            const my = this.input.mouseY;
+            if (!document.hidden) {
+                if (mx < edgeSize) {
+                    this.camera.x -= maxSpeed * ((edgeSize - mx) / edgeSize) * deltaTime;
+                }
+                if (mx > this.camera.width - edgeSize) {
+                    this.camera.x += maxSpeed * ((mx - (this.camera.width - edgeSize)) / edgeSize) * deltaTime;
+                }
+                if (my < edgeSize) {
+                    this.camera.y -= maxSpeed * ((edgeSize - my) / edgeSize) * deltaTime;
+                }
+                if (my > this.camera.height - edgeSize) {
+                    this.camera.y += maxSpeed * ((my - (this.camera.height - edgeSize)) / edgeSize) * deltaTime;
+                }
+                this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
+                this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
+            }
+        }
+
+        // Smooth arrow-key scrolling while keys are held
+        const keys = this.input.keysDown;
+        if (keys.size > 0) {
+            const kSpeed = 700 * deltaTime;
+            if (keys.has('ArrowLeft'))  this.camera.x -= kSpeed;
+            if (keys.has('ArrowRight')) this.camera.x += kSpeed;
+            if (keys.has('ArrowUp'))    this.camera.y -= kSpeed;
+            if (keys.has('ArrowDown'))  this.camera.y += kSpeed;
+            this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
+            this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
+        }
+    }
+
+    togglePause(force) {
+        if (this.gameState !== 'playing') return;
+        this.paused = force !== undefined ? force : !this.paused;
+        if (this.sfx) this.sfx.updateMusicVolume();
+        this.updatePauseButton();
+    }
+
+    updatePauseButton() {
+        const b = document.getElementById('pause-btn');
+        if (!b) return;
+        b.textContent = this.paused ? '▶ Resume (P)' : '⏸ Pause (P)';
+        b.style.background = this.paused ? '#2E7D32' : '#455A64';
+    }
+
     gameLoop(currentTime) {
         const deltaTime = Math.min((currentTime - this.lastTime) / 1000, 0.1);
         this.lastTime = currentTime;
 
-        this.update(deltaTime);
+        if (this.paused && this.gameState === 'playing') {
+            // Frozen battlefield: only the camera moves, so you can look around and give orders
+            this.updateCamera(deltaTime);
+        } else {
+            this.update(deltaTime);
+        }
         this.render();
 
         requestAnimationFrame((time) => this.gameLoop(time));

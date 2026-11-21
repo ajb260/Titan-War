@@ -145,6 +145,14 @@ Defined in `RIVERS` (polyline + `halfWidth` + bridge points). `Game.initRivers()
 
 ---
 
+## Sound, Pause & Difficulty
+
+- **Sound** (`SoundFX`, `game.sfx`): all effects and the music loop are synthesised with Web Audio (no files). `game.sfx.play(name, x, y, size)` — positional (distance fade + stereo pan) when given world coordinates; per-sound throttling stops big fights turning to noise. Audio unlocks on the first click/key (browser autoplay rules). Sound/Music toggles live in the side panel and campaign menu; saved in localStorage.
+- **Pause** (`P` key / side-panel button): `gameLoop` calls only `updateCamera()` while `game.paused`, so you can scroll and queue orders on a frozen battlefield. Music ducks while paused.
+- **Difficulty** (`DIFFICULTIES`, picker on the campaign menu, saved in localStorage): `base` picks the starting buildings/units (Easy = everything, Normal = small working base, Hard = HQ + refinery only); multipliers scale starting credits, enemy income (`aiIncome`), time between enemy attacks (`aiAttack`), enemy HP (`enemyHp`, via `applyEnemyDifficulty`) and the town raid grace period (`raidDelay`). Default is Easy.
+
+---
+
 ## Mountains
 
 `MOUNTAIN_RIDGES` (polylines + half-width) ring the player's base; `MOUNTAIN_PASSES` are the three gaps (East, South-East, South-West). Rock is rasterised into the same grid as water (value `2`; water is `1`), so `isWater()` means "blocked ground" and all river logic (pathing, building, spawning, civilians) applies automatically. Each pass adds three pathfinding nodes (inside, centre, outside). Helicopters fly over. Millbrook was moved to (1010, 470) to clear the east ridge.
