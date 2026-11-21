@@ -145,6 +145,14 @@ Defined in `RIVERS` (polyline + `halfWidth` + bridge points). `Game.initRivers()
 
 ---
 
+## Mission Results
+
+When a mission ends, `checkGameEnd()` → `endMission(won, reason)` → `showResultsScreen(...)`. The screen shows the mission name, reason, a stats table from `game.stats` (reset in `init()`: units/buildings built and lost, enemy units/buildings destroyed, credits earned) plus time (`missionTime`, which doesn't advance while paused), difficulty and civilians saved.
+
+Wins earn 1–3 stars from a visible checklist: destroy the enemy HQ; save ≥ 75% of civilians; win within par time (`parTimeFor`: 6 min + 0.6 min × mission id). The best rating per mission is stored in localStorage `titanwar_stars` and shown on the campaign cards. Victory/defeat stingers play via `game.sfx`.
+
+---
+
 ## Sound, Pause & Difficulty
 
 - **Sound** (`SoundFX`, `game.sfx`): all effects and the music loop are synthesised with Web Audio (no files). `game.sfx.play(name, x, y, size)` — positional (distance fade + stereo pan) when given world coordinates; per-sound throttling stops big fights turning to noise. Audio unlocks on the first click/key (browser autoplay rules). Sound/Music toggles live in the side panel and campaign menu; saved in localStorage.

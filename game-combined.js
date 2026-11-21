@@ -856,6 +856,7 @@ class Unit {
             if (dist < 50) {
                 if (this.team === game.playerTeam) {
                     game.resources.credits += this.carrying;
+                    if (game.stats) game.stats.creditsEarned += this.carrying;
                     game.refreshLiveUI();
                 } else {
                     game.ai.credits += this.carrying;
@@ -4085,6 +4086,7 @@ class City {
 
         // Protected towns pay a small tax to the player
         game.resources.credits += this.civilians.length * 0.2 * dt;
+        if (game.stats) game.stats.creditsEarned += this.civilians.length * 0.2 * dt;
 
         if (this.civilians.length === 0) {
             this.fallen = true;
@@ -4318,6 +4320,10 @@ class SoundFX {
             case 'ready':     this.tone(dest, t, 0.09, 'square', 660, 660, 0.07);
                               this.tone(dest, t + 0.1, 0.12, 'square', 990, 990, 0.07); break;
             case 'built':     [523, 659, 784].forEach((f, i) => this.tone(dest, t + i * 0.09, 0.16, 'triangle', f, f, 0.16)); break;
+            case 'victory':   [392, 523, 659, 784, 1047].forEach((f, i) =>
+                                  this.tone(dest, t + i * 0.13, i === 4 ? 0.9 : 0.2, 'triangle', f, f, 0.22)); break;
+            case 'defeat':    [392, 349, 311, 262].forEach((f, i) =>
+                                  this.tone(dest, t + i * 0.28, i === 3 ? 1.2 : 0.3, 'sawtooth', f, f * 0.98, 0.09)); break;
             case 'radio':     this.tone(dest, t, 0.05, 'square', 1400, 1400, 0.04);
                               this.noise(dest, t + 0.05, 0.12, 'bandpass', 2000, 1500, 0.06); break;
         }
@@ -4543,6 +4549,14 @@ class Game {
         this.units.forEach(u => { if (u.team === this.enemyTeam) this.applyEnemyDifficulty(u); });
 
         this.initCities();
+
+        // Battle statistics for the mission results screen
+        this.stats = {
+            unitsBuilt: 0, buildingsBuilt: 0,
+            unitsLost: 0, buildingsLost: 0,
+            enemyUnitsKilled: 0, enemyBuildingsDestroyed: 0,
+            creditsEarned: 0
+        };
 
         this.resetFog();
         this.updateFog(); // Reveal starting area immediately
@@ -5641,6 +5655,7 @@ class Game {
                     );
                     this.units.push(unit);
                     this.sfx.play('ready');
+                    this.stats.unitsBuilt++;
                 } else if (item.itemType === 'building') {
                     const building = createBuilding(
                         item.buildingType,
@@ -5650,6 +5665,7 @@ class Game {
                     );
                     this.buildings.push(building);
                     this.sfx.play('built');
+                    this.stats.buildingsBuilt++;
                 }
 
                 // Remove from queue
@@ -5658,9 +5674,15 @@ class Game {
             }
         }
 
+        // Nukes resolve before the death checks so their victims explode and are counted
+        this.nukes.forEach(n => n.update(deltaTime));
+        this.shockwaves.forEach(s => s.update(deltaTime));
+
         // Create explosion particles for dying units
         this.units.forEach(unit => {
             if (unit.hp <= 0) {
+                if (unit.team === this.playerTeam) this.stats.unitsLost++;
+                else this.stats.enemyUnitsKilled++;
                 this.createExplosion(unit.x, unit.y, unit.size, unit.color);
                 this.addWreck(unit.x, unit.y, unit.size >= 18);
                 if (unit.team === this.playerTeam) {
@@ -5672,6 +5694,8 @@ class Game {
         // Create explosion particles for dying buildings
         this.buildings.forEach(building => {
             if (building.hp <= 0) {
+                if (building.team === this.playerTeam) this.stats.buildingsLost++;
+                else this.stats.enemyBuildingsDestroyed++;
                 this.createExplosion(building.x, building.y, building.width, building.color);
                 this.addWreck(building.x, building.y, true);
                 if (building.garrison && building.garrison.length > 0) {
@@ -5684,8 +5708,6 @@ class Game {
             }
         });
 
-        this.nukes.forEach(n => n.update(deltaTime));
-        this.shockwaves.forEach(s => s.update(deltaTime));
 
         this.units = this.units.filter(unit => unit.hp > 0);
 
@@ -5907,52 +5929,121 @@ class Game {
     // ---- END FOG OF WAR ----
 
     checkGameEnd() {
+        if (this.gameState !== 'playing') return;
         const playerHQ = this.buildings.find(b => b.team === this.playerTeam && b.type === 'hq');
         const enemyHQ = this.buildings.find(b => b.team === this.enemyTeam && b.type === 'hq');
-
         const allCitiesFallen = this.cities.length > 0 && this.cities.every(c => c.fallen);
 
-        if (!playerHQ && this.gameState === 'playing') {
-            this.gameState = 'lost';
-            this.showGameEndScreen('DEFEAT', 'Your HQ has been destroyed!', '#f44336', false);
-        } else if (allCitiesFallen && this.gameState === 'playing') {
-            this.gameState = 'lost';
-            this.showGameEndScreen('DEFEAT', 'Every town has fallen. There is no one left to protect.', '#f44336', false);
-        } else if (!enemyHQ && this.gameState === 'playing') {
-            this.gameState = 'won';
-            if (this.currentMission) {
-                const completed = this.getCompletedMissions();
-                if (!completed.includes(this.currentMission.id)) {
-                    completed.push(this.currentMission.id);
-                    try { localStorage.setItem('titanwar_completed', JSON.stringify(completed)); } catch (e) { /* storage blocked */ }
-                }
-            }
-            const hasNext = this.currentMission && this.currentMission.id < MISSIONS.length;
-            const saved = this.cities.reduce((s, c) => s + c.population, 0);
-            const total = this.cities.reduce((s, c) => s + c.initialPop, 0);
-            const civLine = total > 0 ? `<br><span style="font-size:18px;color:#B3E5FC;">🏘 Civilians saved: ${saved}/${total}</span>` : '';
-            this.showGameEndScreen('VICTORY', 'Enemy HQ destroyed!' + civLine, '#4CAF50', hasNext);
+        if (!playerHQ) {
+            this.endMission(false, 'Your HQ has been destroyed!');
+        } else if (allCitiesFallen) {
+            this.endMission(false, 'Every town has fallen. There is no one left to protect.');
+        } else if (!enemyHQ) {
+            this.endMission(true, 'Enemy HQ destroyed!');
         }
     }
 
-    showGameEndScreen(title, message, color, hasNextMission) {
+    // Par time (seconds) for the "fast victory" star
+    parTimeFor(mission) {
+        const id = mission ? mission.id : 1;
+        return Math.round((6 + id * 0.6) * 60);
+    }
+
+    getBestStars() {
+        const v = loadSetting('titanwar_stars', {});
+        return v && typeof v === 'object' ? v : {};
+    }
+
+    endMission(won, reason) {
+        this.gameState = won ? 'won' : 'lost';
+        this.paused = false;
+        const mission = this.currentMission;
+        const st = this.stats || {};
+        const time = this.missionTime || 0;
+        const saved = this.cities.reduce((n, c) => n + c.population, 0);
+        const total = this.cities.reduce((n, c) => n + c.initialPop, 0);
+        const par = this.parTimeFor(mission);
+
+        // Star checklist (only meaningful on a win)
+        const goals = [
+            { text: 'Destroy the enemy HQ', done: won },
+            { text: `Save at least 75% of civilians (${saved}/${total})`, done: won && (total === 0 || saved >= total * 0.75) },
+            { text: `Win in under ${this.formatTime(par)}`, done: won && time <= par }
+        ];
+        const stars = won ? goals.filter(g => g.done).length : 0;
+
+        let newBest = false;
+        if (won && mission) {
+            const completed = this.getCompletedMissions();
+            if (!completed.includes(mission.id)) {
+                completed.push(mission.id);
+                saveSetting('titanwar_completed', completed);
+            }
+            const best = this.getBestStars();
+            if (stars > (best[mission.id] || 0)) {
+                best[mission.id] = stars;
+                saveSetting('titanwar_stars', best);
+                newBest = true;
+            }
+        }
+        if (this.sfx) this.sfx.play(won ? 'victory' : 'defeat');
+
+        this.showResultsScreen({ won, reason, stars, goals, newBest, time, saved, total, st,
+            hasNext: won && mission && mission.id < MISSIONS.length });
+    }
+
+    formatTime(sec) {
+        const m = Math.floor(sec / 60), s = Math.floor(sec % 60);
+        return `${m}:${String(s).padStart(2, '0')}`;
+    }
+
+    showResultsScreen(r) {
+        const existing = document.getElementById('game-end-overlay');
+        if (existing) existing.remove();
+        const color = r.won ? '#4CAF50' : '#f44336';
+        const mission = this.currentMission;
+        const diff = this.diff();
+
         const overlay = document.createElement('div');
         overlay.id = 'game-end-overlay';
-        overlay.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.82);display:flex;align-items:center;justify-content:center;z-index:1000;animation:fadeIn 0.5s;`;
+        overlay.style.cssText = `position:fixed;top:0;left:0;width:100%;height:100%;background:rgba(0,0,0,0.85);display:flex;align-items:center;justify-content:center;z-index:1000;animation:fadeIn 0.5s;overflow:auto;`;
 
-        const btnStyle = (bg) => `background:${bg};color:#fff;border:none;padding:12px 28px;font-size:17px;border-radius:5px;cursor:pointer;margin:6px;transition:all 0.2s;`;
+        const btnStyle = (bg) => `background:${bg};color:#fff;border:none;padding:12px 26px;font-size:16px;border-radius:5px;cursor:pointer;margin:6px;width:auto;`;
+        let buttons = '';
+        if (r.hasNext) buttons += `<button id="ges-next" style="${btnStyle('#4CAF50')}">Next Mission &rarr;</button>`;
+        buttons += `<button id="ges-retry" style="${btnStyle(r.won ? '#455A64' : '#f44336')}">${r.won ? 'Replay' : 'Retry'}</button>`;
+        if (mission) buttons += `<button id="ges-campaign" style="${btnStyle('#1565C0')}">Campaign Menu</button>`;
 
-        let buttons = `<button id="ges-retry" style="${btnStyle(color)}">Retry</button>`;
-        if (hasNextMission) {
-            buttons = `<button id="ges-next" style="${btnStyle('#4CAF50')}">Next Mission &rarr;</button>` + buttons;
-        }
-        if (this.currentMission) {
-            buttons += `<button id="ges-campaign" style="${btnStyle('#1565C0')}">Campaign Menu</button>`;
-        }
+        // Stars pop in one by one
+        const starHtml = r.won ? `<div style="font-size:54px;letter-spacing:10px;margin:4px 0 6px;">${[0, 1, 2].map(i =>
+            `<span style="display:inline-block;color:${i < r.stars ? '#FFD54F' : '#424242'};text-shadow:${i < r.stars ? '0 0 14px #FFB300' : 'none'};opacity:0;animation:starPop 0.45s ${0.35 + i * 0.3}s forwards;">★</span>`).join('')}</div>
+            ${r.newBest ? '<div style="color:#FFD54F;font-weight:bold;margin-bottom:6px;">New best rating!</div>' : ''}
+            <div style="text-align:left;display:inline-block;margin:4px 0 14px;">${r.goals.map(g =>
+                `<div style="color:${g.done ? '#C8E6C9' : '#888'};font-size:15px;margin:3px 0;">${g.done ? '✅' : '⬜'} ${g.text}</div>`).join('')}</div>` : '';
 
-        overlay.innerHTML = `<div style="background:#1a1a1a;border:4px solid ${color};border-radius:10px;padding:40px;text-align:center;max-width:480px;animation:slideIn 0.5s;">
-            <h1 style="color:${color};font-size:48px;margin:0 0 16px;text-shadow:0 0 10px ${color};">${title}</h1>
-            <p style="color:#fff;font-size:22px;margin:0 0 28px;">${message}</p>
+        const st = r.st;
+        const statRows = [
+            ['⏱ Time', this.formatTime(r.time)],
+            ['🎚 Difficulty', `<span style="color:${diff.color}">${diff.label}</span>`],
+            ['🏭 Units built', st.unitsBuilt || 0],
+            ['🏗 Buildings built', st.buildingsBuilt || 0],
+            ['💀 Units lost', st.unitsLost || 0],
+            ['🧱 Buildings lost', st.buildingsLost || 0],
+            ['🎯 Enemy units destroyed', st.enemyUnitsKilled || 0],
+            ['💥 Enemy buildings destroyed', st.enemyBuildingsDestroyed || 0],
+            ['💰 Credits earned', Math.floor(st.creditsEarned || 0)],
+            ['🏘 Civilians saved', r.total > 0 ? `${r.saved}/${r.total}` : '—']
+        ];
+        const statsHtml = `<div style="display:grid;grid-template-columns:1fr auto;gap:6px 24px;text-align:left;background:#111;border:1px solid #333;border-radius:6px;padding:14px 18px;margin:0 auto 18px;max-width:380px;">
+            ${statRows.map(([k, v]) => `<div style="color:#aaa;font-size:15px;">${k}</div><div style="color:#fff;font-size:15px;font-weight:bold;text-align:right;">${v}</div>`).join('')}
+        </div>`;
+
+        overlay.innerHTML = `<div style="background:#1a1a1a;border:4px solid ${color};border-radius:10px;padding:28px 36px;text-align:center;max-width:520px;width:90%;animation:slideIn 0.5s;margin:auto;">
+            ${mission ? `<div style="color:#888;font-size:14px;letter-spacing:2px;">MISSION ${mission.id} — ${mission.name.toUpperCase()}</div>` : ''}
+            <h1 style="color:${color};font-size:46px;margin:6px 0 6px;text-shadow:0 0 10px ${color};">${r.won ? 'VICTORY' : 'DEFEAT'}</h1>
+            <p style="color:#fff;font-size:18px;margin:0 0 8px;">${r.reason}</p>
+            ${starHtml}
+            ${statsHtml}
             <div>${buttons}</div>
         </div>`;
 
@@ -5961,7 +6052,7 @@ class Game {
         if (!document.getElementById('ges-anim-style')) {
             const s = document.createElement('style');
             s.id = 'ges-anim-style';
-            s.textContent = `@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes slideIn{from{transform:translateY(-50px);opacity:0}to{transform:translateY(0);opacity:1}}`;
+            s.textContent = `@keyframes fadeIn{from{opacity:0}to{opacity:1}}@keyframes slideIn{from{transform:translateY(-50px);opacity:0}to{transform:translateY(0);opacity:1}}@keyframes starPop{0%{opacity:0;transform:scale(2.4)}70%{opacity:1;transform:scale(0.9)}100%{opacity:1;transform:scale(1)}}`;
             document.head.appendChild(s);
         }
 
@@ -5969,22 +6060,22 @@ class Game {
             overlay.remove();
             this.restartGame();
         });
-
         const nextBtn = document.getElementById('ges-next');
-        if (nextBtn) {
-            nextBtn.addEventListener('click', () => {
-                overlay.remove();
-                this.startMission(this.currentMission.id + 1);
-            });
-        }
-
+        if (nextBtn) nextBtn.addEventListener('click', () => {
+            overlay.remove();
+            this.startMission(this.currentMission.id + 1);
+        });
         const campaignBtn = document.getElementById('ges-campaign');
-        if (campaignBtn) {
-            campaignBtn.addEventListener('click', () => {
-                overlay.remove();
-                this.showCampaignScreen();
-            });
-        }
+        if (campaignBtn) campaignBtn.addEventListener('click', () => {
+            overlay.remove();
+            this.showCampaignScreen();
+        });
+    }
+
+    // Kept for compatibility with older callers
+    showGameEndScreen(title, message, color, hasNextMission) {
+        this.showResultsScreen({ won: title === 'VICTORY', reason: message, stars: 0, goals: [], newBest: false,
+            time: this.missionTime || 0, saved: 0, total: 0, st: this.stats || {}, hasNext: hasNextMission });
     }
 
     restartGame() {
@@ -6119,6 +6210,7 @@ class Game {
         this.gameState = 'campaign';
         this.input.keysDown.clear();
         const completed = this.getCompletedMissions();
+        const bestStars = this.getBestStars();
 
         const overlay = document.createElement('div');
         overlay.id = 'campaign-overlay';
@@ -6133,6 +6225,7 @@ class Game {
             // Locked missions must not be clickable
             return `<div ${isUnlocked ? `onclick="window._game.startMission(${m.id})"` : ''} style="background:${isUnlocked ? '#1e1e1e' : '#111'};border:2px solid ${isUnlocked ? dColor : '#333'};border-radius:8px;padding:clamp(12px,2vh,24px) clamp(14px,2vw,28px);margin:clamp(4px,0.6vmin,10px);cursor:${isUnlocked ? 'pointer' : 'default'};opacity:${isUnlocked ? 1 : 0.45};min-width:clamp(180px,18vw,300px);max-width:clamp(200px,22vw,340px);flex:1;transition:all 0.2s;" onmouseover="if(${isUnlocked})this.style.background='#2a2a2a'" onmouseout="this.style.background='${isUnlocked ? '#1e1e1e' : '#111'}'">
                 <div style="color:${dColor};font-weight:bold;font-size:clamp(11px,1.4vmin,18px);letter-spacing:1px;">${m.difficulty} ${isDone ? '✓' : ''}</div>
+                ${isDone ? `<div style="font-size:clamp(14px,1.8vmin,22px);letter-spacing:3px;">${[0, 1, 2].map(i => `<span style="color:${i < (bestStars[m.id] || 0) ? '#FFD54F' : '#444'};">★</span>`).join('')}</div>` : ''}
                 <div style="color:#fff;font-size:clamp(15px,2vmin,26px);font-weight:bold;margin:clamp(3px,0.5vmin,8px) 0;">${m.id}. ${m.name}</div>
                 <div style="color:#aaa;font-size:clamp(10px,1.2vmin,16px);">${isUnlocked ? m.description : '🔒 Complete previous mission to unlock'}</div>
             </div>`;
