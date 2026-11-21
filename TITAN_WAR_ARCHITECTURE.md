@@ -101,6 +101,8 @@ Two-layer persistent fog:
 | `1` — explored | Was seen, not currently visible | Fully clear (terrain stays revealed permanently) |
 | `2` — visible | Currently in vision range | Fully clear + enemies shown |
 
+**The player's map starts fully revealed** (`resetFog()` fills `playerFog` with `1`), so terrain, towns and the enemy base are always visible; areas your forces can't currently see are lightly dimmed and hide enemy units. Fog is drawn from a 1-pixel-per-tile texture scaled up with smoothing (soft edges). The enemy's fog still starts unexplored.
+
 **Implementation**: `game.playerFog` and `game.enemyFog` are `Uint8Array` grids with tile size 48 world-units. Each frame `updateFog()` decays `2→1`, then re-marks tiles visible around every unit/building using `markFogVisible()`.
 
 **Visibility radii** are per-unit/building type (e.g. sniper: 320, soldier: 220, HQ: 280). Set as `visionRadius` in `setStats()`.
@@ -129,6 +131,29 @@ MISSIONS = [
 `Game.startMission(missionId)` — full state reset, sets `this.currentMission`, calls `init()`, centers camera on player base.
 
 Win condition: destroy enemy HQ. Lose condition: player HQ destroyed.
+
+---
+
+## Rivers & Bridges
+
+Defined in `RIVERS` (polyline + `halfWidth` + bridge points). `Game.initRivers()` rasterises water into an 8-unit `waterGrid` (bridge decks are dry) and builds a small graph of bridge-end nodes.
+
+- `isWater(x, y)`, `lineClear(...)`, `nearestLand(...)`, `findPath(sx, sy, gx, gy)` (Dijkstra over bridge nodes; `null` = walk straight).
+- `Unit.stepMovement(dt, speedMult, game)` follows the cached path, slides along banks, and retargets clicks on water to the nearest bank. Helicopters (`isAir`) ignore water.
+- Collisions never push a unit into water. Buildings can't go on water or block a bridge. Spawns, scenery and civilians avoid water.
+- Great River splits the map north–south (bridges at y≈350, 820, 1580); Willow Creek joins it from the west (bridges at x≈450, 1225).
+
+---
+
+## Towns & Civilians
+
+Neutral towns (`City`, `House`, `Civilian` classes; sites in `CITY_SITES`) the player must protect. Missions 1–3 have 2 towns, 4–8 have 3, 9+ have 4. Each town has 7 houses with 2 civilians each.
+
+- Houses/civilians are **not** in `game.units`/`game.buildings`, so player units never target them. Enemy targeting (`findTarget`, `findNearbyEnemy`), enemy splash and AI raids include them via `game.cityTargets()`, gated by `game.townsExposed()` (a grace period `raidDelay` = max(60, 150 − 6×missionId) seconds; a radio warning fires 15s before).
+- Civilians wander near home, flee enemies within 170, and get run over by enemy vehicles. A destroyed house kills about half its residents. Nukes (anyone's) wipe out anything in the blast.
+- Living civilians pay the player 0.2 credits/sec each.
+- **Lose condition:** every town fallen (population 0). Victory screen shows civilians saved.
+- HUD: "Towns to protect" panel top-left (with raid countdown), town labels, minimap markers that flash red while under attack.
 
 ---
 

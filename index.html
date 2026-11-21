@@ -119,6 +119,9 @@
                         Select units, then:<br>
                         • Right-click ground to MOVE<br>
                         • Right-click enemy to ATTACK<br>
+                        • Shift+click/drag adds to selection<br>
+                        • Ctrl/Shift+1-9 sets a group, 1-9 recalls (tap twice to jump)<br>
+                        • Arrow keys scroll the map<br>
                         • Or use buttons below:
                     </div>
                     <button id="move-mode-btn" style="background: #2196F3;">
@@ -130,6 +133,7 @@
                     <button id="stop-btn">⏹️ Stop (S)</button>
                     <button id="launch-nuke-btn" style="background:#FF5722;display:none;width:100%;margin-top:5px;">☢ Launch Nuke (800)</button>
                     <hr style="margin: 10px 0; border-color: #1565C0;">
+                    <button id="fog-toggle-btn" style="background:#37474F;width:100%;margin-bottom:5px;">🌫 Fog of War: OFF</button>
                     <button id="campaign-btn" style="background:#1565C0;width:100%;">🗺 Campaign Menu</button>
                     <hr style="margin: 10px 0; border-color: #FFD700;">
                     <h3 style="color: #FFD700;">💰 CHEATS 💰</h3>
@@ -141,6 +145,6 @@
         </div>
     </div>
 
-    <script src="game-combined.js"></script>
+    <script src="game-combined.js?v=fogbtn2"></script>
 </body>
 </html>

@@ -9,17 +9,22 @@ class Particle {
         this.velocityY = velocityY;
         this.life = 1.0;
         this.decay = 0.02;
+        this.gravity = 0.2; // per-frame @60fps; smoke/fire use ~0 or negative so they rise
+        this.grow = 0;      // size change per frame @60fps (smoke billows outward)
     }
 
     update(deltaTime) {
-        this.x += this.velocityX * deltaTime * 60;
-        this.y += this.velocityY * deltaTime * 60;
-        this.velocityY += 0.2; // Gravity
-        this.life -= this.decay;
+        // All rates are tuned for 60fps; scale so effects look the same at any refresh rate
+        const f = deltaTime * 60;
+        this.x += this.velocityX * f;
+        this.y += this.velocityY * f;
+        this.velocityY += this.gravity * f;
+        if (this.grow) this.size = Math.max(0.5, this.size + this.grow * f);
+        this.life -= this.decay * f;
     }
 
     render(ctx, camera) {
-        ctx.globalAlpha = this.life;
+        ctx.globalAlpha = Math.max(0, this.life);
         ctx.fillStyle = this.color;
         ctx.beginPath();
         ctx.arc(this.x - camera.x, this.y - camera.y, this.size, 0, Math.PI * 2);
@@ -48,7 +53,7 @@ class Projectile {
     }
 
     update(deltaTime) {
-        if (!this.target || this.target.hp <= 0) {
+        if (!this.target || this.target.hp <= 0 || this.target.garrisonedIn) {
             this.dead = true;
             return;
         }
@@ -63,6 +68,8 @@ class Projectile {
             const p = new Particle(this.x, this.y, `rgb(${grey},${grey},${grey})`,
                 2 + Math.random() * 2, (Math.random()-0.5)*0.3, -0.4 - Math.random()*0.3);
             p.decay = 0.06;
+            p.gravity = 0;
+            p.grow = 0.06;
             this.game.particles.push(p);
         }
 
@@ -77,15 +84,47 @@ class Projectile {
             if (this.target.hp <= 0 && this.owner && typeof this.owner.addKill === 'function') {
                 this.owner.addKill();
             }
+
+            if (this.game) {
+                // Suppress hit target
+                if (this.target.suppressTimer !== undefined) this.target.suppressTimer = 0.5;
+
+                // Impact sparks / dust at hit point
+                const sparkColor = this.target.team === 'player' ? '#FF6B6B' : '#FFD700';
+                for (let i = 0; i < 4; i++) {
+                    const sp = new Particle(this.x, this.y, sparkColor,
+                        1.5 + Math.random() * 2,
+                        (Math.random()-0.5)*5, (Math.random()-0.5)*5 - 1);
+                    sp.decay = 0.09;
+                    this.game.particles.push(sp);
+                }
+
+                // Red flash when player takes hits
+                if (this.target.team === 'player') {
+                    this.game.damageFlash = Math.min(1, this.game.damageFlash + 0.25);
+                    if (this.game.radioMessages.length === 0 ||
+                        this.game.radioMessages[0].text !== '📡 Taking fire!') {
+                        this.game.addRadioMessage('📡 Taking fire!', '#FF6B6B');
+                    }
+                }
+            }
+
             // AoE splash damage for mortar shells
             if (this.aoe > 0 && this.game) {
-                [...this.game.units, ...this.game.buildings].forEach(entity => {
-                    if (entity === this.target) return;
+                // Enemy shells also hurt nearby townsfolk (player fire avoids friendly civilians)
+                const civ = this.owner && this.owner.team === this.game.enemyTeam && this.game.townsExposed() ? this.game.cityTargets() : [];
+                [...this.game.units, ...this.game.buildings, ...civ].forEach(entity => {
+                    if (entity === this.target || entity.garrisonedIn || entity.hp <= 0) return;
                     if (entity.team === (this.owner ? this.owner.team : null)) return;
                     const ex = entity.x - this.x, ey = entity.y - this.y;
                     const ed = Math.sqrt(ex*ex + ey*ey);
                     if (ed < this.aoe) {
                         entity.hp -= this.damage * (1 - ed / this.aoe);
+                        if (entity.suppressTimer !== undefined) entity.suppressTimer = 0.8;
+                        // Splash kills count toward veterancy too
+                        if (entity.hp <= 0 && this.owner && typeof this.owner.addKill === 'function') {
+                            this.owner.addKill();
+                        }
                     }
                 });
                 this.game.createExplosion(this.x, this.y, 40, '#FF4500');
@@ -156,13 +195,17 @@ class NukeProjectile {
         this.trailTimer += deltaTime;
         if (this.trailTimer >= 0.04) {
             this.trailTimer = 0;
-            this.game.particles.push(new Particle(
+            const trail = new Particle(
                 this.x, this.y,
                 ['#888', '#aaa', '#bbb', '#999'][Math.floor(Math.random() * 4)],
                 3 + Math.random() * 4,
                 (Math.random() - 0.5) * 1.5,
                 (Math.random() - 0.5) * 1.5
-            ));
+            );
+            trail.gravity = 0;
+            trail.grow = 0.08;
+            trail.decay = 0.015;
+            this.game.particles.push(trail);
         }
 
         if (dist < this.speed * deltaTime) {
@@ -177,11 +220,18 @@ class NukeProjectile {
     explode() {
         const r = this.explosionRadius;
 
-        // Instantly kill all units in radius
+        // Instantly kill all units in radius (garrisoned units die with their building)
         this.game.units.forEach(unit => {
+            if (unit.garrisonedIn) return;
             const dx = unit.x - this.targetX;
             const dy = unit.y - this.targetY;
             if (Math.sqrt(dx * dx + dy * dy) <= r) unit.hp = 0;
+        });
+
+        // Nukes don't discriminate — towns in the blast are devastated
+        this.game.cityTargets().forEach(t => {
+            const dx = t.x - this.targetX, dy = t.y - this.targetY;
+            if (Math.sqrt(dx * dx + dy * dy) <= r) t.hp = 0;
         });
 
         // Heavily damage buildings, more at center
@@ -279,6 +329,14 @@ class Unit {
         this.selected = false;
         this.attackMove = false;
         this.target = null;
+
+        // Order state
+        this.destX = x;            // final destination of the current move / attack-move order
+        this.destY = y;
+        this.forcedMove = false;   // explicit move order: don't get distracted by enemies until arrival
+        this.garrisonTarget = null; // friendly building this unit is walking to garrison in
+        this.stuckTimer = 0;
+        this.facing = 1;           // 1 = facing right, -1 = facing left (sprites are mirrored)
 
         this.setStats(type);
     }
@@ -442,6 +500,8 @@ class Unit {
         this.kills = 0;
         this.veterancy = 0; // 0=rookie 1=veteran(3kills) 2=elite(8kills) 3=hero(18kills)
         this.garrisonedIn = null;
+        this.suppressTimer = 0;
+        this.dustTimer = 0;
 
         // Harvester-specific properties
         if (type === 'harvester') {
@@ -467,15 +527,134 @@ class Unit {
     moveTo(x, y) {
         this.targetX = x;
         this.targetY = y;
+        this.destX = x;
+        this.destY = y;
         this.target = null;
         this.attackMove = false;
+        this.forcedMove = true;
+        this.garrisonTarget = null;
+        this.stuckTimer = 0;
+    }
+
+    attackTarget(target) {
+        this.target = target;
+        this.attackMove = false;
+        this.forcedMove = false;
+        this.garrisonTarget = null;
+    }
+
+    orderGarrison(building) {
+        this.moveTo(building.x, building.y);
+        this.garrisonTarget = building;
     }
 
     stop() {
         this.targetX = this.x;
         this.targetY = this.y;
+        this.destX = this.x;
+        this.destY = this.y;
         this.target = null;
         this.attackMove = false;
+        this.forcedMove = false;
+        this.garrisonTarget = null;
+    }
+
+    // Shared movement step: walks toward (targetX, targetY), updates facing,
+    // and releases a forced move once arrived (or hopelessly blocked).
+    stepMovement(deltaTime, speedMult = 1, game = null) {
+        const ground = !this.isAir && game && game.waterGrid;
+
+        // Ground units can't stand in rivers: retarget clicks on water to the nearest bank
+        if (ground && game.isWater(this.targetX, this.targetY)) {
+            const land = game.nearestLand(this.targetX, this.targetY);
+            if (Math.abs(this.destX - this.targetX) < 1 && Math.abs(this.destY - this.targetY) < 1) {
+                this.destX = land.x; this.destY = land.y;
+            }
+            this.targetX = land.x; this.targetY = land.y;
+        }
+
+        const gx = this.targetX, gy = this.targetY;   // final goal
+        let wx = gx, wy = gy;                          // where we're heading right now
+
+        // Route across rivers via bridges (path is cached and refreshed when the goal moves)
+        if (ground) {
+            this.pathAge = (this.pathAge || 0) + deltaTime;
+            if (!this.pathGoal || Math.abs(gx - this.pathGoal.x) + Math.abs(gy - this.pathGoal.y) > 30 || this.pathAge > 2) {
+                this.path = game.findPath(this.x, this.y, gx, gy);
+                this.pathGoal = { x: gx, y: gy };
+                this.pathAge = 0;
+            }
+            while (this.path && this.path.length > 1 &&
+                   Math.abs(this.path[0].x - this.x) + Math.abs(this.path[0].y - this.y) < 16) {
+                this.path.shift();
+            }
+            if (this.path && this.path.length > 1) { wx = this.path[0].x; wy = this.path[0].y; }
+        }
+
+        const dx = wx - this.x;
+        const dy = wy - this.y;
+        const legDist = Math.sqrt(dx * dx + dy * dy);
+        const gdx = gx - this.x, gdy = gy - this.y;
+        const dist = Math.sqrt(gdx * gdx + gdy * gdy);   // distance to the final goal
+        let moved = false;
+        if (legDist > 2) {
+            const step = Math.min(legDist, this.speed * speedMult * deltaTime);
+            let nx = this.x + (dx / legDist) * step;
+            let ny = this.y + (dy / legDist) * step;
+            // Don't walk into water; slide along the bank instead
+            if (ground && game.isWater(nx, ny) && !game.isWater(this.x, this.y)) {
+                if (!game.isWater(nx, this.y)) ny = this.y;
+                else if (!game.isWater(this.x, ny)) nx = this.x;
+                else { nx = this.x; ny = this.y; }
+            }
+            const moveDist = Math.abs(nx - this.x) + Math.abs(ny - this.y);
+            this.x = nx; this.y = ny;
+            if (!this.target && Math.abs(dx) > 3) this.facing = dx > 0 ? 1 : -1;
+            moved = moveDist > 0.01;
+
+            // Stuck detection based on actual progress (detours are fine, standing still isn't)
+            if (this.forcedMove) {
+                this.stuckTimer = moveDist < step * 0.2 ? this.stuckTimer + deltaTime : 0;
+            }
+        }
+
+        if (this.forcedMove) {
+            if (dist < this.size + 6) {
+                this.forcedMove = false;
+            } else if (this.stuckTimer > 1.5) {
+                // Something keeps blocking us — give up the forced move so the unit can defend itself
+                this.forcedMove = false;
+                this.stuckTimer = 0;
+            }
+        }
+        return moved;
+    }
+
+    tryEnterGarrison(game) {
+        const b = this.garrisonTarget;
+        if (!b) return false;
+        if (b.hp <= 0 || b.garrison.length >= b.maxGarrison) {
+            this.garrisonTarget = null;
+            this.stop();
+            return false;
+        }
+        const dx = b.x - this.x, dy = b.y - this.y;
+        if (Math.sqrt(dx * dx + dy * dy) <= Math.max(b.width, b.height) / 2 + this.size + 8) {
+            this.garrisonTarget = null;
+            this.garrisonedIn = b;
+            this.target = null;
+            this.forcedMove = false;
+            this.selected = false;
+            this.x = b.x; this.y = b.y;
+            b.garrison.push(this);
+            if (game.selectedUnits.includes(this)) {
+                game.selectedUnits = game.selectedUnits.filter(u => u !== this);
+                game.updateUI();
+            }
+            return true;
+        }
+        this.targetX = b.x; this.targetY = b.y;
+        return false;
     }
 
     update(deltaTime, game) {
@@ -485,36 +664,49 @@ class Unit {
             return;
         }
 
+        if (this.garrisonTarget && this.tryEnterGarrison(game)) return;
+
         if (this.type === 'medic') {
-            // Move toward nearest damaged friendly
-            let healTarget = null;
-            let minDist = Infinity;
-            game.units.forEach(u => {
-                if (u === this || u.team !== this.team || u.hp >= u.maxHp || u.garrisonedIn) return;
-                const dx = u.x - this.x, dy = u.y - this.y;
-                const d = Math.sqrt(dx*dx+dy*dy);
-                if (d < minDist) { minDist = d; healTarget = u; }
-            });
-            if (healTarget && minDist < 80) {
-                healTarget.hp = Math.min(healTarget.hp + 10 * deltaTime, healTarget.maxHp);
-                this.targetX = this.x; this.targetY = this.y; // stop moving
-            } else if (healTarget) {
-                this.targetX = healTarget.x; this.targetY = healTarget.y;
+            // Seek damaged friendlies nearby — unless the player ordered us somewhere
+            if (!this.forcedMove) {
+                let healTarget = null;
+                let minDist = 260; // only look around us, don't run across the map
+                game.units.forEach(u => {
+                    if (u === this || u.team !== this.team || u.hp >= u.maxHp || u.garrisonedIn) return;
+                    const dx = u.x - this.x, dy = u.y - this.y;
+                    const d = Math.sqrt(dx*dx+dy*dy);
+                    if (d < minDist) { minDist = d; healTarget = u; }
+                });
+                if (healTarget && minDist < 80) {
+                    healTarget.hp = Math.min(healTarget.hp + 10 * deltaTime, healTarget.maxHp);
+                    this.targetX = this.x; this.targetY = this.y; // stop moving
+                    if (Math.abs(healTarget.x - this.x) > 3) this.facing = healTarget.x > this.x ? 1 : -1;
+                    // Little green "+" sparkles while healing
+                    if (Math.random() < deltaTime * 6) {
+                        const hp = new Particle(healTarget.x + (Math.random()-0.5)*healTarget.size,
+                            healTarget.y - healTarget.size * 0.5, '#76FF03', 2, 0, -0.6);
+                        hp.gravity = 0; hp.decay = 0.03;
+                        game.particles.push(hp);
+                    }
+                } else if (healTarget) {
+                    this.targetX = healTarget.x; this.targetY = healTarget.y;
+                }
             }
-            // Move
-            const hdx = this.targetX - this.x, hdy = this.targetY - this.y;
-            const hdist = Math.sqrt(hdx*hdx+hdy*hdy);
-            if (hdist > 2) {
-                const ang = Math.atan2(hdy, hdx);
-                this.x += Math.cos(ang) * this.speed * deltaTime;
-                this.y += Math.sin(ang) * this.speed * deltaTime;
-            }
+            this.stepMovement(deltaTime, 1, game);
+            this.handleCollisions(game);
             if (this.attackCooldown > 0) this.attackCooldown -= deltaTime;
             return;
         }
 
-        // Auto-engage nearby enemies even when not in attack-move mode
-        if (!this.target) {
+        // Drop targets that died or vanished into a building; attack-movers resume their march
+        if (this.target && (this.target.hp <= 0 || this.target.garrisonedIn)) {
+            this.target = null;
+            if (this.attackMove) { this.targetX = this.destX; this.targetY = this.destY; }
+        }
+
+        // Auto-engage nearby enemies — but an explicit move order (e.g. a retreat) takes priority
+        const holdFire = this.forcedMove && !this.attackMove;
+        if (!this.target && !holdFire) {
             this.findNearbyEnemy(game);
         }
 
@@ -526,10 +718,9 @@ class Unit {
             const dx = this.target.x - this.x;
             const dy = this.target.y - this.y;
             const dist = Math.sqrt(dx * dx + dy * dy);
+            if (Math.abs(dx) > 3) this.facing = dx > 0 ? 1 : -1;
 
-            if (this.target.hp <= 0) {
-                this.target = null;
-            } else if (dist <= this.range) {
+            if (dist <= this.range) {
                 this.attack(this.target, deltaTime, game);
 
                 // Stop moving if we're comfortably within range
@@ -548,14 +739,32 @@ class Unit {
             }
         }
 
-        const dx = this.targetX - this.x;
-        const dy = this.targetY - this.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
+        // Suppression slows movement (helicopters are immune)
+        if (this.suppressTimer > 0) this.suppressTimer = Math.max(0, this.suppressTimer - deltaTime);
+        const suppressMult = this.suppressTimer > 0 && !this.isAir ? 0.5 : 1;
 
-        if (dist > 2) {
-            const angle = Math.atan2(dy, dx);
-            this.x += Math.cos(angle) * this.speed * deltaTime;
-            this.y += Math.sin(angle) * this.speed * deltaTime;
+        const moved = this.stepMovement(deltaTime, suppressMult, game);
+
+        // Attack-move order complete: clear it so the unit goes idle (and the AI can re-task it)
+        if (this.attackMove && !this.target) {
+            const ddx = this.destX - this.x, ddy = this.destY - this.y;
+            if (ddx * ddx + ddy * ddy < 30 * 30) this.attackMove = false;
+        }
+
+        // Vehicle dust trail
+        if (moved && (this.type === 'tank' || this.type === 'apc' || this.type === 'artillery')) {
+            this.dustTimer -= deltaTime;
+            if (this.dustTimer <= 0) {
+                this.dustTimer = 0.08;
+                const dust = new Particle(this.x - this.facing * this.size * 0.8 + (Math.random()-0.5)*this.size * 0.5,
+                                          this.y + this.size * 0.4,
+                                          '#8D7355', 3 + Math.random()*3,
+                                          (Math.random()-0.5)*0.6, -0.15 - Math.random()*0.2);
+                dust.decay = 0.018;
+                dust.gravity = 0;
+                dust.grow = 0.06;
+                game.particles.push(dust);
+            }
         }
 
         // Apply collision physics and crushing
@@ -567,10 +776,15 @@ class Unit {
     }
 
     handleCollisions(game) {
+        // Never let units drift (or get shoved) off the edge of the map
+        const m = this.size;
+        this.x = Math.max(m, Math.min(game.worldWidth - m, this.x));
+        this.y = Math.max(m, Math.min(game.worldHeight - m, this.y));
         if (this.isAir) return; // helicopters fly over everything
         // Check collisions with other units
         for (const other of game.units) {
-            if (other === this) continue;
+            // Ignore self, aircraft overhead, units inside buildings, and corpses awaiting cleanup
+            if (other === this || other.isAir || other.garrisonedIn || other.hp <= 0) continue;
 
             const dx = other.x - this.x;
             const dy = other.y - this.y;
@@ -608,13 +822,14 @@ class Unit {
                 const separationX = (dx / dist) * separationForce * 10;
                 const separationY = (dy / dist) * separationForce * 10;
 
-                // Push this unit away
-                this.x -= separationX * myPushRatio;
-                this.y -= separationY * myPushRatio;
-
-                // Push other unit away
-                other.x += separationX * otherPushRatio;
-                other.y += separationY * otherPushRatio;
+                // Push both units apart — but never shove anyone into a river
+                // (that's what used to let crowds leak across without a bridge)
+                const pushTo = (u, nx, ny) => {
+                    if (game.waterGrid && game.isWater(nx, ny) && !game.isWater(u.x, u.y)) return;
+                    u.x = nx; u.y = ny;
+                };
+                pushTo(this, this.x - separationX * myPushRatio, this.y - separationY * myPushRatio);
+                pushTo(other, other.x + separationX * otherPushRatio, other.y + separationY * otherPushRatio);
             }
         }
     }
@@ -640,7 +855,7 @@ class Unit {
             if (dist < 50) {
                 if (this.team === game.playerTeam) {
                     game.resources.credits += this.carrying;
-                    game.updateUI();
+                    game.refreshLiveUI();
                 } else {
                     game.ai.credits += this.carrying;
                 }
@@ -663,20 +878,21 @@ class Unit {
                     deposit.amount -= harvestAmount;
                     this.carrying += harvestAmount;
                     this.shovelAngle = Math.sin(Date.now() / 100) * 0.3;
+                    // Gold glints kicked up while digging
+                    if (Math.random() < deltaTime * 8) {
+                        const g = new Particle(deposit.x + (Math.random()-0.5)*20, deposit.y + (Math.random()-0.5)*10,
+                            Math.random() < 0.5 ? '#FFD700' : '#FFF59D', 1.5 + Math.random()*1.5,
+                            (Math.random()-0.5)*1.5, -1.5 - Math.random());
+                        g.decay = 0.05;
+                        game.particles.push(g);
+                    }
                 }
             }
         }
 
-        // Move
-        const dx = this.targetX - this.x;
-        const dy = this.targetY - this.y;
-        const dist = Math.sqrt(dx * dx + dy * dy);
-
-        if (dist > 2) {
-            const angle = Math.atan2(dy, dx);
-            this.x += Math.cos(angle) * this.speed * deltaTime;
-            this.y += Math.sin(angle) * this.speed * deltaTime;
-        }
+        // Move (harvesters run their own logic, so player move orders never "stick")
+        this.forcedMove = false;
+        this.stepMovement(deltaTime, 1, game);
 
         // Apply collision physics for harvesters too
         this.handleCollisions(game);
@@ -717,7 +933,7 @@ class Unit {
         const fogGrid = this.team === game.playerTeam ? game.playerFog : game.enemyFog;
 
         game.units.forEach(unit => {
-            if (unit.team !== this.team && unit.type !== 'harvester') {
+            if (unit.team !== this.team && unit.type !== 'harvester' && !unit.garrisonedIn && unit.hp > 0) {
                 // Can only auto-aggro onto enemies the team can actually see
                 if (game.fogStateAt(unit.x, unit.y, fogGrid) !== 2) return;
                 const dx = unit.x - this.x;
@@ -731,9 +947,19 @@ class Unit {
             }
         });
 
+        // Enemy troops also open fire on civilians they come across
+        if (this.team === game.enemyTeam && game.townsExposed()) {
+            game.cityTargets().forEach(t => {
+                if (!t.isCivilian) return;
+                const dx = t.x - this.x, dy = t.y - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < detectionRange && dist < minDist) { minDist = dist; nearestEnemy = t; }
+            });
+        }
+
         if (nearestEnemy) {
+            // Note: attackMove is intentionally kept so attack-move orders resume after the fight
             this.target = nearestEnemy;
-            this.attackMove = false;
         }
     }
 
@@ -742,7 +968,7 @@ class Unit {
         let minDist = Infinity;
 
         game.units.forEach(unit => {
-            if (unit.team !== this.team) {
+            if (unit.team !== this.team && !unit.garrisonedIn && unit.hp > 0) {
                 const dx = unit.x - this.x;
                 const dy = unit.y - this.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
@@ -766,6 +992,15 @@ class Unit {
                 }
             }
         });
+
+        // Enemy raiders attack town houses and civilians
+        if (this.team === game.enemyTeam && game.townsExposed()) {
+            game.cityTargets().forEach(t => {
+                const dx = t.x - this.x, dy = t.y - this.y;
+                const dist = Math.sqrt(dx * dx + dy * dy);
+                if (dist < 300 && dist < minDist) { minDist = dist; nearestTarget = t; }
+            });
+        }
 
         this.target = nearestTarget;
     }
@@ -840,6 +1075,23 @@ class Unit {
         if (this.garrisonedIn) return; // garrisoned units are not rendered on map
         const screenX = this.x - camera.x;
         const screenY = this.y - camera.y;
+
+        // Soft ground shadow anchors units to the terrain (helicopters draw their own)
+        if (!this.isAir) {
+            const isVehicle = this.canCrush;
+            ctx.fillStyle = 'rgba(0,0,0,0.28)';
+            ctx.beginPath();
+            ctx.ellipse(screenX + 2, screenY + this.size * (isVehicle ? 0.6 : 0.95),
+                        this.size * (isVehicle ? 1.1 : 0.6), this.size * 0.28, 0, 0, Math.PI * 2);
+            ctx.fill();
+        }
+
+        // Mirror the sprite so units face the direction they're moving / shooting
+        ctx.save();
+        if (this.facing < 0) {
+            ctx.translate(screenX * 2, 0);
+            ctx.scale(-1, 1);
+        }
 
         ctx.fillStyle = this.team === 'player' ? this.color : '#f44336';
 
@@ -1086,6 +1338,8 @@ class Unit {
             ctx.fill();
         }
 
+        ctx.restore(); // end facing mirror
+
         // Selection indicator
         if (this.selected) {
             ctx.strokeStyle = '#fff';
@@ -1104,14 +1358,31 @@ class Unit {
         const barX = screenX - barWidth / 2;
         const barY = screenY - this.size - 8;
 
-        const hpFrac = this.hp / this.maxHp;
-        const barColor = hpFrac > 0.6 ? '#4CAF50' : hpFrac > 0.3 ? '#FF9800' : '#f44336';
-        ctx.fillStyle = 'rgba(0,0,0,0.6)';
-        ctx.fillRect(barX - 1, barY - 1, barWidth + 2, barHeight + 2);
-        ctx.fillStyle = '#222';
-        ctx.fillRect(barX, barY, barWidth, barHeight);
-        ctx.fillStyle = barColor;
-        ctx.fillRect(barX, barY, barWidth * hpFrac, barHeight);
+        // Only show health bars when they carry information (damaged or selected) to cut clutter
+        const hpFrac = Math.max(0, this.hp / this.maxHp);
+        if (hpFrac < 0.999 || this.selected) {
+            const barColor = hpFrac > 0.6 ? '#4CAF50' : hpFrac > 0.3 ? '#FF9800' : '#f44336';
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(barX - 1, barY - 1, barWidth + 2, barHeight + 2);
+            ctx.fillStyle = '#222';
+            ctx.fillRect(barX, barY, barWidth, barHeight);
+            ctx.fillStyle = barColor;
+            ctx.fillRect(barX, barY, barWidth * hpFrac, barHeight);
+        }
+
+        // Command-aura indicator: small gold chevron on boosted units
+        if (this.commandBoost && this.type !== 'general') {
+            ctx.fillStyle = this.team === 'player' ? '#FFD700' : '#FF8A80';
+            ctx.beginPath();
+            ctx.moveTo(screenX + this.size + 2, barY - 1);
+            ctx.lineTo(screenX + this.size + 6, barY + 3);
+            ctx.lineTo(screenX + this.size + 10, barY - 1);
+            ctx.lineTo(screenX + this.size + 10, barY + 2);
+            ctx.lineTo(screenX + this.size + 6, barY + 6);
+            ctx.lineTo(screenX + this.size + 2, barY + 2);
+            ctx.closePath();
+            ctx.fill();
+        }
 
         if (this.veterancy > 0) {
             ctx.fillStyle = this.veterancy === 3 ? '#FF6B35' : this.veterancy === 2 ? '#E0E0E0' : '#FFD700';
@@ -1137,6 +1408,17 @@ class Unit {
             ctx.beginPath();
             ctx.moveTo(screenX, screenY);
             ctx.lineTo(this.target.x - camera.x, this.target.y - camera.y);
+            ctx.stroke();
+            ctx.setLineDash([]);
+        } else if (this.selected && (this.forcedMove || this.attackMove || this.garrisonTarget)) {
+            // Waypoint line: green = move, orange = attack-move, cyan = garrison
+            ctx.strokeStyle = this.garrisonTarget ? 'rgba(0,229,255,0.5)'
+                : this.attackMove ? 'rgba(255,152,0,0.5)' : 'rgba(118,255,3,0.45)';
+            ctx.lineWidth = 1;
+            ctx.setLineDash([4, 6]);
+            ctx.beginPath();
+            ctx.moveTo(screenX, screenY);
+            ctx.lineTo(this.destX - camera.x, this.destY - camera.y);
             ctx.stroke();
             ctx.setLineDash([]);
         }
@@ -1278,7 +1560,7 @@ class Building {
             }
 
             // Find target if we don't have one
-            if (!this.target || this.target.hp <= 0) {
+            if (!this.target || this.target.hp <= 0 || this.target.garrisonedIn) {
                 this.findTarget(game);
             }
 
@@ -1298,7 +1580,9 @@ class Building {
                         500, // projectile speed
                         4, // projectile size
                         '#FFD700', // color
-                        'turret_bullet'
+                        'turret_bullet',
+                        null,
+                        game
                     );
                     game.projectiles.push(projectile);
                     this.attackCooldown = this.attackSpeed;
@@ -1331,22 +1615,29 @@ class Building {
                     // Burst of cyan particles at intercept point
                     for (let i = 0; i < 18; i++) {
                         const angle = (i / 18) * Math.PI * 2;
-                        const spd = 60 + Math.random() * 80;
-                        game.particles.push(new Particle(
+                        // Particle velocities are px/frame @60fps — keep them small or they vanish instantly
+                        const spd = 2 + Math.random() * 3;
+                        const cp = new Particle(
                             target.x, target.y, '#00E5FF',
                             4 + Math.random() * 4,
                             Math.cos(angle) * spd, Math.sin(angle) * spd
-                        ));
+                        );
+                        cp.gravity = 0.05;
+                        game.particles.push(cp);
                     }
+                    game.createExplosion(target.x, target.y, 30, '#00E5FF', false);
                     // Orange flash at battery
                     for (let i = 0; i < 8; i++) {
                         const angle = Math.random() * Math.PI * 2;
-                        game.particles.push(new Particle(
+                        const op = new Particle(
                             this.x, this.y, '#FF6F00',
                             3 + Math.random() * 3,
-                            Math.cos(angle) * 50, Math.sin(angle) * 50
-                        ));
+                            Math.cos(angle) * 2, Math.sin(angle) * 2 - 1
+                        );
+                        op.decay = 0.06;
+                        game.particles.push(op);
                     }
+                    if (this.team === game.playerTeam) game.addRadioMessage('🛰 Nuke intercepted!', '#00E5FF');
                     target.dead = true;
                     this.interceptCooldown = this.maxInterceptCooldown;
                     this.interceptsTotal++;
@@ -1377,14 +1668,14 @@ class Building {
             if (this.garrisonAttackCooldown <= 0) {
                 const garrisonRange = 280;
                 const enemy = game.units.find(u => {
-                    if (u.team === this.team) return false;
+                    if (u.team === this.team || u.garrisonedIn || u.hp <= 0) return false;
                     const dx = u.x - this.x, dy = u.y - this.y;
                     return Math.sqrt(dx*dx+dy*dy) <= garrisonRange;
                 });
                 if (enemy) {
                     const shooter = this.garrison[Math.floor(Math.random() * this.garrison.length)];
                     const dmg = (shooter.damage || 5) * 1.5; // 50% bonus inside building
-                    game.projectiles.push(new Projectile(this.x, this.y, enemy, dmg, 450, 3, shooter.color || '#4CAF50', 'garrison_bullet', shooter));
+                    game.projectiles.push(new Projectile(this.x, this.y, enemy, dmg, 450, 3, shooter.color || '#4CAF50', 'garrison_bullet', shooter, game));
                     this.garrisonAttackCooldown = (shooter.attackSpeed || 1.0) / this.garrison.length;
                 }
             }
@@ -1397,7 +1688,7 @@ class Building {
 
         // Check units
         game.units.forEach(unit => {
-            if (unit.team !== this.team && unit.type !== 'harvester') {
+            if (unit.team !== this.team && unit.type !== 'harvester' && !unit.garrisonedIn && unit.hp > 0) {
                 const dx = unit.x - this.x;
                 const dy = unit.y - this.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
@@ -1899,6 +2190,10 @@ class InputHandler {
         this.hoveredEnemy = null; // Track which enemy is being hovered
         this.hoveredDeposit = null; // Track which ore deposit is being hovered
 
+        this.keysDown = new Set();      // held keys, for smooth arrow-key scrolling
+        this.lastGroupKey = null;       // for double-tap-to-center on control groups
+        this.lastGroupTime = 0;
+
         this.setupListeners();
     }
 
@@ -1914,6 +2209,9 @@ class InputHandler {
         });
 
         window.addEventListener('keydown', (e) => this.onKeyDown(e));
+        window.addEventListener('keyup', (e) => this.keysDown.delete(e.key));
+        // Drop held keys when the window loses focus so the camera doesn't keep scrolling
+        window.addEventListener('blur', () => this.keysDown.clear());
 
         this.canvas.addEventListener('wheel', (e) => {
             e.preventDefault();
@@ -2050,7 +2348,7 @@ class InputHandler {
             if (!this.hoveredDeposit) {
                 // Check units
                 for (const unit of this.game.units) {
-                    if (unit.team !== this.game.playerTeam) {
+                    if (unit.team !== this.game.playerTeam && !unit.garrisonedIn && this.game.isVisibleToPlayer(unit.x, unit.y)) {
                         const dx = worldX - unit.x;
                         const dy = worldY - unit.y;
                         const dist = Math.sqrt(dx * dx + dy * dy);
@@ -2110,14 +2408,14 @@ class InputHandler {
                 const isDrag = Math.abs(maxX - minX) > 5 || Math.abs(maxY - minY) > 5;
 
                 if (isDrag) {
-                    this.selectUnitsInBox(minX, minY, maxX, maxY);
+                    this.selectUnitsInBox(minX, minY, maxX, maxY, e.shiftKey);
                 } else {
                     // It's a click - first check if clicking on a friendly unit/building to select it
                     const clickedOnFriendly = this.checkClickOnFriendly(this.dragStart.x, this.dragStart.y);
 
                     if (clickedOnFriendly) {
-                        // Clicking on friendly unit/building - select it
-                        this.selectAtPoint(this.dragStart.x, this.dragStart.y);
+                        // Clicking on friendly unit/building - select it (Shift toggles units in/out)
+                        this.selectAtPoint(this.dragStart.x, this.dragStart.y, e.shiftKey);
                     } else if (this.game.selectedUnits.length > 0) {
                         // Units are selected and not clicking on friendly - perform move or attack action
                         this.executeLeftClickAction(this.dragStart.x, this.dragStart.y);
@@ -2137,7 +2435,7 @@ class InputHandler {
     checkClickOnFriendly(worldX, worldY) {
         // Check if clicking on a friendly unit
         for (const unit of this.game.units) {
-            if (unit.team === this.game.playerTeam) {
+            if (unit.team === this.game.playerTeam && !unit.garrisonedIn) {
                 const dx = worldX - unit.x;
                 const dy = worldY - unit.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
@@ -2189,7 +2487,7 @@ class InputHandler {
         if (!clickedDeposit) {
             // Check units
             for (const unit of this.game.units) {
-                if (unit.team !== this.game.playerTeam) {
+                if (unit.team !== this.game.playerTeam && !unit.garrisonedIn && this.game.isVisibleToPlayer(unit.x, unit.y)) {
                     const dx = worldX - unit.x;
                     const dy = worldY - unit.y;
                     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -2218,6 +2516,7 @@ class InputHandler {
         }
 
         // Command selected units
+        const movers = [];
         this.game.selectedUnits.forEach(unit => {
             if (clickedDeposit && unit.type === 'harvester') {
                 // Harvester - target the ore deposit
@@ -2225,13 +2524,14 @@ class InputHandler {
                 // Don't reset carrying - let harvester deposit first if full, then come back
             } else if (clickedEnemy) {
                 // Attack enemy
-                unit.target = clickedEnemy;
-                unit.attackMove = false;
+                unit.attackTarget(clickedEnemy);
             } else {
-                // Move to location
-                unit.moveTo(worldX, worldY);
+                movers.push(unit);
             }
         });
+        // Move to location in a loose formation instead of piling onto one pixel
+        this.game.issueGroupMove(movers, worldX, worldY);
+        if (clickedEnemy) this.game.addOrderMarker(clickedEnemy.x, clickedEnemy.y, '#FF1744');
     }
 
     onRightClick(e) {
@@ -2278,7 +2578,7 @@ class InputHandler {
 
         if (!clickedDeposit) {
             for (const unit of this.game.units) {
-                if (unit.team !== this.game.playerTeam) {
+                if (unit.team !== this.game.playerTeam && !unit.garrisonedIn && this.game.isVisibleToPlayer(unit.x, unit.y)) {
                     const dx = worldX - unit.x;
                     const dy = worldY - unit.y;
                     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -2313,15 +2613,16 @@ class InputHandler {
                     if (building.team === this.game.playerTeam &&
                         worldX >= building.x - building.width/2 && worldX <= building.x + building.width/2 &&
                         worldY >= building.y - building.height/2 && worldY <= building.y + building.height/2) {
-                        // Garrison soldiers into this building
+                        // Order soldiers to walk to this building and garrison it on arrival
+                        // (previously they teleported in from anywhere on the map)
                         const toGarrison = this.game.selectedUnits.filter(u => ['soldier','sniper','commando'].includes(u.type));
                         const space = building.maxGarrison - building.garrison.length;
-                        toGarrison.slice(0, space).forEach(u => {
-                            u.garrisonedIn = building;
-                            u.selected = false;
-                            building.garrison.push(u);
-                        });
-                        this.game.selectedUnits = this.game.selectedUnits.filter(u => !u.garrisonedIn);
+                        if (space <= 0) {
+                            this.game.addRadioMessage('🚪 Building is full', '#FFB74D');
+                            return;
+                        }
+                        toGarrison.slice(0, space).forEach(u => u.orderGarrison(building));
+                        this.game.addOrderMarker(building.x, building.y, '#00E5FF');
                         this.game.updateUI();
                         return;
                     }
@@ -2329,7 +2630,7 @@ class InputHandler {
             }
             if (!clickedDeposit && !clickedEnemy) {
                 // Right-click on empty ground: issue move then deselect
-                this.game.selectedUnits.forEach(unit => unit.moveTo(worldX, worldY));
+                this.game.issueGroupMove(this.game.selectedUnits, worldX, worldY);
                 this.game.selectedUnits.forEach(unit => unit.selected = false);
                 this.game.selectedUnits = [];
                 if (this.game.selectedBuilding) {
@@ -2339,16 +2640,18 @@ class InputHandler {
                 this.canvas.style.cursor = 'default';
                 this.game.updateUI();
             } else {
+                const movers = [];
                 this.game.selectedUnits.forEach(unit => {
                     if (clickedDeposit && unit.type === 'harvester') {
                         unit.targetDeposit = clickedDeposit;
                     } else if (clickedEnemy) {
-                        unit.target = clickedEnemy;
-                        unit.attackMove = false;
+                        unit.attackTarget(clickedEnemy);
                     } else {
-                        unit.moveTo(worldX, worldY);
+                        movers.push(unit);
                     }
                 });
+                this.game.issueGroupMove(movers, worldX, worldY);
+                if (clickedEnemy) this.game.addOrderMarker(clickedEnemy.x, clickedEnemy.y, '#FF1744');
             }
         } else if (this.game.selectedBuilding) {
             // Right-click with a building selected deselects it
@@ -2359,11 +2662,7 @@ class InputHandler {
     }
 
     executeMove(worldX, worldY) {
-        if (this.game.selectedUnits.length > 0) {
-            this.game.selectedUnits.forEach(unit => {
-                unit.moveTo(worldX, worldY);
-            });
-        }
+        this.game.issueGroupMove(this.game.selectedUnits, worldX, worldY);
     }
 
     executeAttack(worldX, worldY) {
@@ -2373,7 +2672,7 @@ class InputHandler {
 
             // Check units
             for (const unit of this.game.units) {
-                if (unit.team !== this.game.playerTeam) {
+                if (unit.team !== this.game.playerTeam && !unit.garrisonedIn && this.game.isVisibleToPlayer(unit.x, unit.y)) {
                     const dx = worldX - unit.x;
                     const dy = worldY - unit.y;
                     const dist = Math.sqrt(dx * dx + dy * dy);
@@ -2401,20 +2700,22 @@ class InputHandler {
             }
 
             // Command units
-            this.game.selectedUnits.forEach(unit => {
-                if (clickedEnemy) {
-                    unit.target = clickedEnemy;
-                    unit.attackMove = false;
-                } else {
-                    // Attack-move to location
-                    unit.moveTo(worldX, worldY);
-                    unit.attackMove = true;
-                }
-            });
+            if (clickedEnemy) {
+                this.game.selectedUnits.forEach(unit => unit.attackTarget(clickedEnemy));
+                this.game.addOrderMarker(clickedEnemy.x, clickedEnemy.y, '#FF1744');
+            } else {
+                // Attack-move to location (units engage anything they meet, then carry on)
+                this.game.issueGroupMove(this.game.selectedUnits, worldX, worldY, true);
+            }
         }
     }
 
     onKeyDown(e) {
+        if (e.key === 'Escape' && this.game.pausedFromBattle && document.getElementById('campaign-overlay')) {
+            this.game.resumeBattle();
+            return;
+        }
+
         if (e.key === 'Escape') {
             this.game.buildMode = null;
             this.game.commandMode = null;
@@ -2435,35 +2736,49 @@ class InputHandler {
             this.game.enterAttackMode();
         }
 
-        // Arrow key camera navigation
-        const scrollSpeed = 15;
-
-        if (e.key === 'ArrowUp') {
-            this.game.camera.y = Math.max(0, this.game.camera.y - scrollSpeed);
+        // Arrow keys scroll smoothly while held (handled in Game.update)
+        if (e.key.startsWith('Arrow')) {
+            this.keysDown.add(e.key);
+            e.preventDefault();
         }
 
-        if (e.key === 'ArrowDown') {
-            this.game.camera.y = Math.min(
-                this.game.worldHeight - this.game.camera.height,
-                this.game.camera.y + scrollSpeed
-            );
-        }
-
-        if (e.key === 'ArrowLeft') {
-            this.game.camera.x = Math.max(0, this.game.camera.x - scrollSpeed);
-        }
-
-        if (e.key === 'ArrowRight') {
-            this.game.camera.x = Math.min(
-                this.game.worldWidth - this.game.camera.width,
-                this.game.camera.x + scrollSpeed
-            );
+        // Control groups: Ctrl/Shift + 1-9 assigns, 1-9 recalls, double-tap centers the camera
+        const digit = /^Digit([0-9])$/.exec(e.code);
+        if (digit && this.game.gameState === 'playing') {
+            const g = digit[1];
+            if (e.ctrlKey || e.shiftKey) {
+                e.preventDefault();
+                this.game.controlGroups[g] = this.game.selectedUnits.slice();
+                this.game.addRadioMessage(`Group ${g} assigned (${this.game.selectedUnits.length})`, '#90CAF9');
+                return;
+            }
+            const group = (this.game.controlGroups[g] || []).filter(u => u.hp > 0 && !u.garrisonedIn);
+            this.game.controlGroups[g] = group;
+            if (group.length === 0) return;
+            this.game.selectedUnits.forEach(u => u.selected = false);
+            if (this.game.selectedBuilding) {
+                this.game.selectedBuilding.selected = false;
+                this.game.selectedBuilding = null;
+            }
+            this.game.selectedUnits = group.slice();
+            group.forEach(u => u.selected = true);
+            const now = performance.now();
+            if (this.lastGroupKey === g && now - this.lastGroupTime < 400) {
+                const cx = group.reduce((s, u) => s + u.x, 0) / group.length;
+                const cy = group.reduce((s, u) => s + u.y, 0) / group.length;
+                this.game.centerCameraOn(cx, cy);
+            }
+            this.lastGroupKey = g;
+            this.lastGroupTime = now;
+            this.game.updateUI();
         }
     }
 
-    selectUnitsInBox(minX, minY, maxX, maxY) {
-        this.game.selectedUnits.forEach(unit => unit.selected = false);
-        this.game.selectedUnits = [];
+    selectUnitsInBox(minX, minY, maxX, maxY, additive = false) {
+        if (!additive) {
+            this.game.selectedUnits.forEach(unit => unit.selected = false);
+            this.game.selectedUnits = [];
+        }
 
         if (this.game.selectedBuilding) {
             this.game.selectedBuilding.selected = false;
@@ -2471,7 +2786,7 @@ class InputHandler {
         }
 
         this.game.units.forEach(unit => {
-            if (unit.team === this.game.playerTeam &&
+            if (unit.team === this.game.playerTeam && !unit.garrisonedIn && !unit.selected &&
                 unit.x >= minX && unit.x <= maxX &&
                 unit.y >= minY && unit.y <= maxY) {
                 unit.selected = true;
@@ -2480,7 +2795,22 @@ class InputHandler {
         });
     }
 
-    selectAtPoint(worldX, worldY) {
+    selectAtPoint(worldX, worldY, additive = false) {
+        // Shift-click toggles a unit in/out of the current selection
+        if (additive && this.game.selectedUnits.length > 0) {
+            for (const unit of this.game.units) {
+                if (unit.team !== this.game.playerTeam || unit.garrisonedIn) continue;
+                const dx = worldX - unit.x, dy = worldY - unit.y;
+                if (Math.sqrt(dx * dx + dy * dy) <= unit.size) {
+                    unit.selected = !unit.selected;
+                    this.game.selectedUnits = unit.selected
+                        ? [...this.game.selectedUnits, unit]
+                        : this.game.selectedUnits.filter(u => u !== unit);
+                    return;
+                }
+            }
+        }
+
         this.game.selectedUnits.forEach(unit => unit.selected = false);
         this.game.selectedUnits = [];
 
@@ -2490,7 +2820,7 @@ class InputHandler {
         }
 
         for (const unit of this.game.units) {
-            if (unit.team === this.game.playerTeam) {
+            if (unit.team === this.game.playerTeam && !unit.garrisonedIn) {
                 const dx = worldX - unit.x;
                 const dy = worldY - unit.y;
                 const dist = Math.sqrt(dx * dx + dy * dy);
@@ -2545,7 +2875,7 @@ class InputHandler {
         }
 
         // Draw bullseye over hovered enemy
-        if (this.hoveredEnemy && this.game.selectedUnits.length > 0) {
+        if (this.hoveredEnemy && this.hoveredEnemy.hp > 0 && this.game.selectedUnits.length > 0) {
             const enemy = this.hoveredEnemy;
             const screenX = enemy.x - camera.x;
             const screenY = enemy.y - camera.y;
@@ -2844,7 +3174,9 @@ class GameAI {
             for (const slot of buildSlots) {
                 const x = myHQ.x + slot.dx;
                 const y = myHQ.y + slot.dy;
-                if (this.game.isValidBuildLocation(x, y)) {
+                // Must pass the AI's team: with no team the player's "near your own base"
+                // rule was applied, so the AI could never build anything.
+                if (this.game.isValidBuildLocation(x, y, this.team)) {
                     this.game.buildings.push(createBuilding(type, x, y, this.team));
                     this.credits -= cost;
                     return true;
@@ -2872,9 +3204,15 @@ class GameAI {
             this.game.isExploredByEnemy(b.x, b.y)
         );
         // Fall back to HQ if nothing explored yet (AI knows roughly where to go)
-        const target = playerBuildings.length > 0
+        let target = playerBuildings.length > 0
             ? [...playerBuildings].sort((a, b) => (buildingPriority[b.type] || 0) - (buildingPriority[a.type] || 0))[0]
             : this.game.buildings.find(b => b.team === this.game.playerTeam && b.type === 'hq');
+
+        // Some waves raid a town instead, forcing the player to split their defences
+        const liveCities = this.game.cities.filter(c => !c.fallen);
+        if (liveCities.length > 0 && this.game.townsExposed() && Math.random() < 0.4) {
+            target = liveCities[Math.floor(Math.random() * liveCities.length)];
+        }
 
         if (!target) return;
 
@@ -3424,6 +3762,350 @@ const BUILD_PREREQS = {
     missile_silo: { requires: 'factory',  label: 'War Factory' }
 };
 
+// ========== RIVERS ==========
+// Water blocks ground units (helicopters fly over); bridges are the only crossings,
+// which turns them into chokepoints. Each river is a polyline (points run past the map
+// edge so the water flows off-screen) with a half-width; bridges sit on the river.
+const RIVERS = [
+    {
+        name: 'Great River',
+        halfWidth: 34,
+        // North → south, splitting the map between your side (west) and the enemy (east)
+        points: [[1650, -40], [1640, 200], [1665, 450], [1690, 700], [1680, 950],
+                 [1645, 1170], [1640, 1350], [1700, 1600], [1665, 1800], [1650, 2040]],
+        bridges: [[1655, 350], [1685, 820], [1695, 1580]]
+    },
+    {
+        name: 'Willow Creek',
+        halfWidth: 24,
+        // West → east tributary that joins the Great River
+        points: [[-40, 1160], [300, 1080], [600, 1150], [850, 1250], [1100, 1200],
+                 [1350, 1150], [1645, 1170]],
+        bridges: [[450, 1115], [1225, 1175]]
+    }
+];
+
+// ========== CITIES ==========
+// Neutral towns full of civilians the player must protect. The enemy will raid them.
+// Houses and civilians are NOT in game.units / game.buildings (so player units never
+// target them); enemy targeting, splash and nukes include them via game.cityTargets().
+const CITY_SITES = [
+    { name: 'Millbrook', x: 900,  y: 430  },
+    { name: 'Riverton',  x: 1450, y: 1350 },
+    { name: 'Oakford',   x: 2050, y: 520  },
+    { name: 'Ashdale',   x: 520,  y: 1480 }
+];
+
+class House {
+    constructor(x, y, w, h, city, palette) {
+        this.x = x; this.y = y;
+        this.width = w; this.height = h;
+        this.maxHp = 220; this.hp = this.maxHp; this.lastHp = this.hp;
+        this.team = 'civilian';
+        this.isHouse = true;
+        this.city = city;
+        this.wall = palette.wall;
+        this.roof = palette.roof;
+    }
+
+    render(ctx, camera) {
+        const sx = this.x - camera.x - this.width / 2;
+        const sy = this.y - camera.y - this.height / 2;
+        const fallen = this.city.fallen;
+        // Shadow
+        ctx.fillStyle = 'rgba(0,0,0,0.3)';
+        ctx.fillRect(sx + 4, sy + 4, this.width, this.height);
+        // Walls
+        ctx.fillStyle = fallen ? '#6d6d6d' : this.wall;
+        ctx.fillRect(sx, sy + this.height * 0.35, this.width, this.height * 0.65);
+        // Pitched roof
+        ctx.fillStyle = fallen ? '#4a4a4a' : this.roof;
+        ctx.beginPath();
+        ctx.moveTo(sx - 3, sy + this.height * 0.4);
+        ctx.lineTo(sx + this.width / 2, sy);
+        ctx.lineTo(sx + this.width + 3, sy + this.height * 0.4);
+        ctx.closePath();
+        ctx.fill();
+        // Door + windows (lit at night-ish warm glow)
+        ctx.fillStyle = '#4E342E';
+        ctx.fillRect(sx + this.width / 2 - 3, sy + this.height - 9, 6, 9);
+        ctx.fillStyle = fallen ? '#333' : '#FFE082';
+        ctx.fillRect(sx + 4, sy + this.height * 0.5, 5, 5);
+        ctx.fillRect(sx + this.width - 9, sy + this.height * 0.5, 5, 5);
+        // Outline
+        ctx.strokeStyle = 'rgba(0,0,0,0.6)';
+        ctx.lineWidth = 1;
+        ctx.strokeRect(sx, sy + this.height * 0.35, this.width, this.height * 0.65);
+        // Health bar only when damaged
+        if (this.hp < this.maxHp) {
+            const frac = Math.max(0, this.hp / this.maxHp);
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(sx - 1, sy - 8, this.width + 2, 5);
+            ctx.fillStyle = frac > 0.6 ? '#4CAF50' : frac > 0.3 ? '#FF9800' : '#f44336';
+            ctx.fillRect(sx, sy - 7, this.width * frac, 3);
+        }
+    }
+}
+
+class Civilian {
+    constructor(x, y, home, city, rng) {
+        this.x = x; this.y = y;
+        this.home = home; this.city = city;
+        this.maxHp = 20; this.hp = this.maxHp; this.lastHp = this.hp;
+        this.team = 'civilian';
+        this.isCivilian = true;
+        this.size = 7;
+        this.tx = x; this.ty = y;
+        this.wanderTimer = rng() * 3;
+        this.panic = 0;
+        this.facing = 1;
+        const shirts = ['#E3F2FD', '#FFCC80', '#CE93D8', '#80DEEA', '#F48FB1', '#FFF59D', '#BCAAA4'];
+        const skins = ['#FFE0BD', '#E0AC69', '#C68642', '#8D5524'];
+        this.shirt = shirts[Math.floor(rng() * shirts.length)];
+        this.skin = skins[Math.floor(rng() * skins.length)];
+    }
+
+    update(dt, game) {
+        // Look for the nearest enemy soldier/vehicle nearby and run from it
+        let threat = null, threatDist = 170;
+        for (const u of game.units) {
+            if (u.team !== game.enemyTeam || u.garrisonedIn || u.hp <= 0) continue;
+            const dx = u.x - this.x, dy = u.y - this.y;
+            const d = Math.sqrt(dx * dx + dy * dy);
+            // Enemy vehicles run people over
+            if (u.canCrush && d < u.size) { this.hp = 0; return; }
+            if (d < threatDist) { threatDist = d; threat = u; }
+        }
+
+        let speed = 22;
+        if (threat) {
+            this.panic = 1.5;
+            const dx = this.x - threat.x, dy = this.y - threat.y;
+            const d = Math.max(1, Math.sqrt(dx * dx + dy * dy));
+            // Flee away from the threat, with a bit of jitter
+            this.tx = this.x + (dx / d) * 90 + (Math.random() - 0.5) * 40;
+            this.ty = this.y + (dy / d) * 90 + (Math.random() - 0.5) * 40;
+        } else {
+            this.wanderTimer -= dt;
+            if (this.wanderTimer <= 0) {
+                this.wanderTimer = 2 + Math.random() * 4;
+                const anchor = this.home && this.home.hp > 0 ? this.home : this.city;
+                const a = Math.random() * Math.PI * 2;
+                const r = 15 + Math.random() * 45;
+                this.tx = anchor.x + Math.cos(a) * r;
+                this.ty = anchor.y + Math.sin(a) * r;
+            }
+        }
+        if (this.panic > 0) { this.panic -= dt; speed = 55; }
+
+        this.tx = Math.max(10, Math.min(game.worldWidth - 10, this.tx));
+        this.ty = Math.max(10, Math.min(game.worldHeight - 10, this.ty));
+        const dx = this.tx - this.x, dy = this.ty - this.y;
+        const d = Math.sqrt(dx * dx + dy * dy);
+        if (d > 2) {
+            const step = Math.min(d, speed * dt);
+            const nx = this.x + (dx / d) * step;
+            const ny = this.y + (dy / d) * step;
+            if (game.isWater(nx, ny)) {
+                // Townsfolk don't swim: pick somewhere else to go
+                this.wanderTimer = 0;
+                this.tx = this.x; this.ty = this.y;
+            } else {
+                this.x = nx; this.y = ny;
+                if (Math.abs(dx) > 2) this.facing = dx > 0 ? 1 : -1;
+            }
+        }
+    }
+
+    render(ctx, camera) {
+        const sx = this.x - camera.x, sy = this.y - camera.y;
+        const s = this.size;
+        const bob = this.panic > 0 ? Math.sin(Date.now() / 60) * 1 : 0;
+        ctx.fillStyle = 'rgba(0,0,0,0.25)';
+        ctx.beginPath();
+        ctx.ellipse(sx + 1, sy + s * 0.95, s * 0.5, s * 0.22, 0, 0, Math.PI * 2);
+        ctx.fill();
+        // Legs
+        ctx.fillStyle = '#455A64';
+        ctx.fillRect(sx - s * 0.3, sy + s * 0.35 + bob, s * 0.22, s * 0.55);
+        ctx.fillRect(sx + s * 0.08, sy + s * 0.35 - bob, s * 0.22, s * 0.55);
+        // Body
+        ctx.fillStyle = this.shirt;
+        ctx.fillRect(sx - s * 0.35, sy - s * 0.25, s * 0.7, s * 0.65);
+        // Head
+        ctx.fillStyle = this.skin;
+        ctx.beginPath();
+        ctx.arc(sx, sy - s * 0.5, s * 0.3, 0, Math.PI * 2);
+        ctx.fill();
+        if (this.panic > 0) {
+            ctx.fillStyle = '#FF5252';
+            ctx.font = 'bold 9px Arial';
+            ctx.textAlign = 'center';
+            ctx.fillText('!', sx, sy - s * 1.0);
+        }
+        if (this.hp < this.maxHp) {
+            const frac = Math.max(0, this.hp / this.maxHp);
+            ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            ctx.fillRect(sx - 6, sy - s - 6, 12, 3);
+            ctx.fillStyle = frac > 0.5 ? '#8BC34A' : '#f44336';
+            ctx.fillRect(sx - 6, sy - s - 6, 12 * frac, 3);
+        }
+    }
+}
+
+class City {
+    constructor(site) {
+        this.name = site.name;
+        this.x = site.x; this.y = site.y;
+        this.radius = 115;
+        this.houses = [];
+        this.civilians = [];
+        this.fallen = false;
+        this.underAttackTimer = 0; // > 0 while recently damaged (drives HUD/minimap warnings)
+        this.alertCooldown = 0;
+        this.smokeTimer = 0;
+
+        // Deterministic layout per city name so towns look the same every time
+        let seed = 0;
+        for (const ch of site.name) seed = (seed * 31 + ch.charCodeAt(0)) >>> 0;
+        const rng = () => { seed = (seed * 1664525 + 1013904223) >>> 0; return seed / 0xffffffff; };
+
+        const palettes = [
+            { wall: '#D7CCC8', roof: '#8D3B2B' }, { wall: '#FFF3E0', roof: '#5D4037' },
+            { wall: '#CFD8DC', roof: '#37474F' }, { wall: '#FFE0B2', roof: '#A1452E' },
+            { wall: '#E8F5E9', roof: '#4E6E3A' }
+        ];
+        const houseCount = 7;
+        for (let i = 0; i < houseCount; i++) {
+            const a = (i / houseCount) * Math.PI * 2 + rng() * 0.4;
+            const r = 55 + rng() * 30;
+            const w = 30 + Math.floor(rng() * 10), h = 28 + Math.floor(rng() * 8);
+            this.houses.push(new House(this.x + Math.cos(a) * r, this.y + Math.sin(a) * r * 0.75, w, h, this,
+                palettes[Math.floor(rng() * palettes.length)]));
+        }
+        // Two residents per house
+        this.houses.forEach(h => {
+            for (let k = 0; k < 2; k++) {
+                this.civilians.push(new Civilian(h.x + (rng() - 0.5) * 30, h.y + h.height * 0.6 + rng() * 10, h, this, rng));
+            }
+        });
+        this.initialPop = this.civilians.length;
+    }
+
+    get population() { return this.civilians.length; }
+
+    update(dt, game) {
+        if (this.underAttackTimer > 0) this.underAttackTimer -= dt;
+        if (this.alertCooldown > 0) this.alertCooldown -= dt;
+        if (this.fallen) return;
+
+        this.civilians.forEach(c => c.update(dt, game));
+
+        // Detect incoming damage (projectiles just subtract hp) to raise the alarm
+        let hit = false;
+        [...this.houses, ...this.civilians].forEach(e => {
+            if (e.hp < e.lastHp) hit = true;
+            e.lastHp = e.hp;
+        });
+        if (hit) {
+            this.underAttackTimer = 4;
+            if (this.alertCooldown <= 0) {
+                this.alertCooldown = 12;
+                game.addRadioMessage(`🏘 ${this.name} is under attack!`, '#FF9800');
+            }
+        }
+
+        // Destroyed houses collapse and take the people inside with them
+        this.houses.forEach(h => {
+            if (h.hp > 0) return;
+            game.createExplosion(h.x, h.y, 34, '#8D6E63');
+            game.addWreck(h.x, h.y, true);
+            this.civilians.forEach(c => { if (c.home === h && Math.random() < 0.5) c.hp = 0; });
+        });
+        this.houses = this.houses.filter(h => h.hp > 0);
+
+        this.civilians.forEach(c => {
+            if (c.hp > 0) return;
+            // Small red puff — no crater, these are people
+            for (let i = 0; i < 6; i++) {
+                const p = new Particle(c.x, c.y, '#C62828', 1.5 + Math.random() * 1.5,
+                    (Math.random() - 0.5) * 2, -1 - Math.random());
+                p.decay = 0.05;
+                game.particles.push(p);
+            }
+        });
+        const before = this.civilians.length;
+        this.civilians = this.civilians.filter(c => c.hp > 0);
+        if (this.civilians.length < before) this.underAttackTimer = 4;
+
+        // Smoke from damaged houses
+        this.smokeTimer -= dt;
+        if (this.smokeTimer <= 0) {
+            this.smokeTimer = 0.2;
+            this.houses.forEach(h => {
+                if (h.hp > h.maxHp * 0.5) return;
+                const grey = Math.floor(50 + Math.random() * 40);
+                const p = new Particle(h.x + (Math.random() - 0.5) * h.width * 0.6, h.y - h.height * 0.3,
+                    `rgb(${grey},${grey},${grey})`, 3 + Math.random() * 3, (Math.random() - 0.5) * 0.4, -0.8);
+                p.decay = 0.012; p.gravity = -0.005; p.grow = 0.05;
+                game.particles.push(p);
+            });
+        }
+
+        // Protected towns pay a small tax to the player
+        game.resources.credits += this.civilians.length * 0.2 * dt;
+
+        if (this.civilians.length === 0) {
+            this.fallen = true;
+            game.addRadioMessage(`☠ ${this.name} has fallen!`, '#FF1744');
+        }
+    }
+
+    // Plaza and paths — drawn under everything
+    renderGround(ctx, camera) {
+        const sx = this.x - camera.x, sy = this.y - camera.y;
+        ctx.save();
+        ctx.fillStyle = 'rgba(176,148,104,0.35)';
+        ctx.beginPath();
+        ctx.ellipse(sx, sy, this.radius, this.radius * 0.8, 0, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.strokeStyle = 'rgba(160,130,90,0.55)';
+        ctx.lineWidth = 6;
+        this.houses.forEach(h => {
+            ctx.beginPath();
+            ctx.moveTo(sx, sy);
+            ctx.lineTo(h.x - camera.x, h.y - camera.y + h.height * 0.5);
+            ctx.stroke();
+        });
+        // Well / fountain in the square
+        ctx.fillStyle = '#90A4AE';
+        ctx.beginPath(); ctx.arc(sx, sy, 9, 0, Math.PI * 2); ctx.fill();
+        ctx.fillStyle = '#4FC3F7';
+        ctx.beginPath(); ctx.arc(sx, sy, 5, 0, Math.PI * 2); ctx.fill();
+        ctx.restore();
+    }
+
+    renderLabel(ctx, camera) {
+        const sx = this.x - camera.x, sy = this.y - camera.y - this.radius * 0.8 - 14;
+        const attacked = this.underAttackTimer > 0 && !this.fallen;
+        const text = this.fallen ? `${this.name} — FALLEN` : `🏘 ${this.name}  ${this.population}/${this.initialPop}`;
+        ctx.save();
+        ctx.font = 'bold 13px Arial';
+        ctx.textAlign = 'center';
+        const w = ctx.measureText(text).width + 14;
+        ctx.fillStyle = 'rgba(0,0,0,0.55)';
+        ctx.fillRect(sx - w / 2, sy - 13, w, 19);
+        if (attacked) {
+            ctx.strokeStyle = `rgba(255,82,82,${0.5 + 0.5 * Math.sin(Date.now() / 120)})`;
+            ctx.lineWidth = 2;
+            ctx.strokeRect(sx - w / 2, sy - 13, w, 19);
+        }
+        ctx.fillStyle = this.fallen ? '#9E9E9E' : attacked ? '#FF8A80' : '#E3F2FD';
+        ctx.fillText(text, sx, sy + 1);
+        ctx.restore();
+    }
+}
+
 // ========== MAIN GAME ==========
 class Game {
     constructor() {
@@ -3452,6 +4134,15 @@ class Game {
         this.shockwaves = [];
         this.screenShake = { x: 0, y: 0, intensity: 0, duration: 0 };
         this.smokeTimer = 0;
+        this.craters = [];       // persistent ground marks
+        this.wrecks = [];        // burning wreckage after deaths
+        this.radioMessages = []; // war chatter HUD messages
+        this.damageFlash = 0;    // red vignette when player takes hits
+        this.orderMarkers = [];  // brief click-feedback rings for move/attack orders
+        this.cities = [];        // neutral towns the player must protect
+        this.revealWholeMap = true; // no fog of war for the player (set false to bring it back)
+        this.controlGroups = {}; // '1'..'9' -> array of units
+        this.uiRefreshTimer = 0; // throttled live refresh of credits / queue / buttons
         this.resources = {
             credits: 2000,
             power: 0,
@@ -3493,6 +4184,8 @@ class Game {
         this.enemyFog = new Uint8Array(this.fogCols * this.fogRows);
         this.initResourceDeposits();
 
+        this.initRivers(); // before decorations so trees/rocks aren't placed in the water
+
         this.decorations = [];
         this.initDecorations();
 
@@ -3519,9 +4212,37 @@ class Game {
         const refinery = createBuilding('refinery', 350, 250, this.playerTeam);
         this.buildings.push(refinery);
 
+        // The player starts with a full base: every building type is already built,
+        // so every unit and ability is unlocked from the first second.
+        const startBase = [
+            ['power',        80,  90],
+            ['missile_silo', 360, 110],
+            ['aa_battery',   480, 160],
+            ['barracks',     90,  330],
+            ['factory',      230, 365],
+            ['turret',       490, 330],
+            ['turret',       340, 470],
+            ['sandbag',      540, 290],
+            ['sandbag',      390, 525]
+        ];
+        startBase.forEach(([type, x, y]) => {
+            const b = createBuilding(type, x, y, this.playerTeam);
+            // The silo starts charging so missions can't be won with an instant nuke
+            if (type === 'missile_silo') b.nukeCooldown = b.maxNukeCooldown;
+            this.buildings.push(b);
+        });
+
+        // ...and one of every unit in the game (plus the usual starting soldiers & harvester)
         this.units.push(createUnit('soldier', 250, 250, this.playerTeam));
         this.units.push(createUnit('soldier', 280, 250, this.playerTeam));
         this.units.push(createUnit('harvester', 300, 280, this.playerTeam));
+        const hqForSpawn = { x: 640, y: 200, width: 0, height: 0 }; // open rally ground east of the base
+        ['tank', 'sniper', 'artillery', 'commando', 'bazooka', 'general',
+         'helicopter', 'medic', 'mortar', 'apc'].forEach(type => {
+            const size = createUnit(type, 0, 0, this.playerTeam).size;
+            const pos = this.findSpawnPosition(hqForSpawn, size);
+            this.units.push(createUnit(type, pos.x, pos.y, this.playerTeam));
+        });
 
         const enemyHQX = 2500, enemyHQY = 1500;
         const enemyHQ = createBuilding('hq', enemyHQX, enemyHQY, this.enemyTeam);
@@ -3541,15 +4262,76 @@ class Game {
                 this.units.push(createUnit(eu.type, enemyHQX + eu.offsetX, enemyHQY + eu.offsetY, this.enemyTeam));
             });
             (mission.enemyExtraBuildings || []).forEach(eb => {
-                this.buildings.push(createBuilding(eb.type, enemyHQX + eb.offsetX, enemyHQY + eb.offsetY, this.enemyTeam));
+                // Some mission layouts stack buildings on top of each other; nudge to the nearest free spot
+                const b = createBuilding(eb.type, enemyHQX + eb.offsetX, enemyHQY + eb.offsetY, this.enemyTeam);
+                const spot = this.findFreeSpotFor(b);
+                b.x = spot.x; b.y = spot.y;
+                this.buildings.push(b);
             });
             this.ai.credits = enemyCredits;
             this.ai.missionConfig = mission.ai || null;
         }
 
+        this.initCities();
+
         this.resetFog();
         this.updateFog(); // Reveal starting area immediately
         this.updateUI();
+    }
+
+    // Nearest position (spiralling outward) where building `b` doesn't overlap another building
+    // and stays inside the map.
+    findFreeSpotFor(b) {
+        const fits = (x, y) => {
+            if (x - b.width / 2 < 10 || x + b.width / 2 > this.worldWidth - 10 ||
+                y - b.height / 2 < 10 || y + b.height / 2 > this.worldHeight - 10) return false;
+            if (this.areaHasWater(x, y, b.width, b.height) || this.nearBridge(x, y, 40)) return false;
+            return !this.buildings.some(o =>
+                Math.abs(o.x - x) < (o.width + b.width) / 2 + 6 &&
+                Math.abs(o.y - y) < (o.height + b.height) / 2 + 6);
+        };
+        if (fits(b.x, b.y)) return { x: b.x, y: b.y };
+        for (let r = 20; r <= 400; r += 20) {
+            for (let a = 0; a < Math.PI * 2; a += Math.PI / 8) {
+                const x = b.x + Math.cos(a) * r, y = b.y + Math.sin(a) * r;
+                if (fits(x, y)) return { x, y };
+            }
+        }
+        return { x: b.x, y: b.y };
+    }
+
+    // More towns to defend as the campaign gets harder
+    initCities() {
+        const id = this.currentMission ? this.currentMission.id : 1;
+        const count = id <= 3 ? 2 : id <= 8 ? 3 : 4;
+        this.cities = CITY_SITES.slice(0, count).map(site => new City(site));
+        // Grace period before the enemy starts raiding towns: time to get defences out
+        this.missionTime = 0;
+        this.raidDelay = Math.max(60, 150 - id * 6);
+        this.raidWarned = false;
+    }
+
+    // Has the grace period ended? (Enemy ignores towns until then.)
+    townsExposed() {
+        return (this.missionTime || 0) >= (this.raidDelay || 0);
+    }
+
+    // Everything in the towns that the enemy can shoot at
+    cityTargets() {
+        const out = [];
+        this.cities.forEach(c => {
+            if (c.fallen) return;
+            c.houses.forEach(h => { if (h.hp > 0) out.push(h); });
+            c.civilians.forEach(p => { if (p.hp > 0) out.push(p); });
+        });
+        return out;
+    }
+
+    // True if a 60x60 building at (x, y) would overlap a town house
+    overlapsCity(x, y) {
+        return this.cities.some(c => c.houses.some(h =>
+            Math.abs(x - h.x) < (60 + h.width) / 2 + 10 &&
+            Math.abs(y - h.y) < (60 + h.height) / 2 + 10));
     }
 
     initResourceDeposits() {
@@ -3593,13 +4375,19 @@ class Game {
     resizeCanvas() {
         const rect = this.canvas.getBoundingClientRect();
         if (rect.width > 0 && rect.height > 0) {
-            this.canvas.width = Math.floor(rect.width);
-            this.canvas.height = Math.floor(rect.height);
+            // Render at the screen's real pixel density so Retina displays aren't blurry.
+            // (Input maths uses CSS-pixel rects, so it's unaffected.)
+            const dpr = Math.min(window.devicePixelRatio || 1, 2);
+            this.canvas.width = Math.floor(rect.width * dpr);
+            this.canvas.height = Math.floor(rect.height * dpr);
             // Keep camera height fixed; adjust width to match canvas aspect ratio
             // so ctx.scale() uses the same factor on both axes (no stretching)
             const baseHeight = 700;
             this.camera.height = baseHeight;
             this.camera.width = Math.round(baseHeight * (rect.width / rect.height));
+            // A resize can leave the camera past the edge of the world; pull it back
+            this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
+            this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
         }
         const mmRect = this.minimapCanvas.getBoundingClientRect();
         if (mmRect.width > 0 && mmRect.height > 0) {
@@ -3675,6 +4463,20 @@ class Game {
         }
 
         // Campaign button
+        // Fog of war on/off (side-panel button; the campaign menu has one too). Remembered between sessions.
+        try {
+            const saved = localStorage.getItem('titanwar_reveal_map');
+            if (saved !== null) this.revealWholeMap = saved === '1';
+        } catch (e) { /* storage blocked: keep the default */ }
+        const fogBtn = document.getElementById('fog-toggle-btn');
+        if (fogBtn) {
+            fogBtn.addEventListener('click', () => {
+                this.toggleFog();
+                fogBtn.blur(); // so keyboard shortcuts keep controlling the game
+            });
+        }
+        this.updateFogButtons();
+
         const campaignBtn = document.getElementById('campaign-btn');
         if (campaignBtn) {
             campaignBtn.addEventListener('click', () => this.showCampaignScreen());
@@ -3718,6 +4520,13 @@ class Game {
             this.buildMode = type;
             this.buildCost = cost;
             this.canvas.style.cursor = 'cell';
+        } else {
+            const info = document.getElementById('selected-info');
+            if (info) {
+                info.textContent = `⚠️ Need ${cost - Math.floor(this.resources.credits)} more credits`;
+                info.style.color = '#f44336';
+                setTimeout(() => { info.textContent = ''; info.style.color = '#aaa'; }, 2000);
+            }
         }
     }
 
@@ -3757,60 +4566,263 @@ class Game {
         }
     }
 
-    getBuildError(x, y) {
+    // Single source of truth for build placement. Returns an error message, or null if OK.
+    // `team` defaults to the player; the AI passes its own team (no base-proximity rules).
+    getBuildError(x, y, team = this.playerTeam) {
         const newBuildingSize = 60;
+        const half = newBuildingSize / 2;
+        if (x - half < 10 || x + half > this.worldWidth - 10 || y - half < 10 || y + half > this.worldHeight - 10) {
+            return 'Too close to the edge of the map!';
+        }
         for (const building of this.buildings) {
             const dx = Math.abs(x - building.x);
             const dy = Math.abs(y - building.y);
             const minDistance = (newBuildingSize + Math.max(building.width, building.height)) / 2 + 10;
             if (dx < minDistance && dy < minDistance) return 'Too close to an existing building!';
         }
-        const playerBuildings = this.buildings.filter(b => b.team === this.playerTeam);
-        const nearFriendly = playerBuildings.some(b => {
-            const dx = x - b.x, dy = y - b.y;
-            return Math.sqrt(dx * dx + dy * dy) <= this.buildRadius;
-        });
-        if (!nearFriendly) return 'Must build within range of your base!';
-        const tooCloseToEnemy = this.buildings.some(b => {
-            if (b.team === this.playerTeam) return false;
-            const dx = x - b.x, dy = y - b.y;
-            return Math.sqrt(dx * dx + dy * dy) < 350;
-        });
-        if (tooCloseToEnemy) return 'Too close to enemy territory!';
-        return null;
-    }
-
-    isValidBuildLocation(x, y, team) {
-        const newBuildingSize = 60;
-
-        // Check overlap with any existing building
-        for (const building of this.buildings) {
-            const dx = Math.abs(x - building.x);
-            const dy = Math.abs(y - building.y);
-            const minDistance = (newBuildingSize + Math.max(building.width, building.height)) / 2 + 10;
-            if (dx < minDistance && dy < minDistance) return false;
+        // Buildings still under construction occupy their spot too
+        for (const item of this.productionQueue) {
+            if (item.itemType !== 'building') continue;
+            if (Math.abs(x - item.x) < newBuildingSize + 10 && Math.abs(y - item.y) < newBuildingSize + 10) {
+                return 'Another building is already going up there!';
+            }
         }
+        if (this.overlapsCity(x, y)) return 'Cannot build on top of a town!';
+        if (this.areaHasWater(x, y, newBuildingSize, newBuildingSize)) return 'Cannot build on water!';
+        if (this.nearBridge(x, y, 40)) return 'Cannot block a bridge!';
 
-        // Player-only proximity rules
-        if (!team || team === this.playerTeam) {
-            // Must be within buildRadius of at least one friendly building
-            const playerBuildings = this.buildings.filter(b => b.team === this.playerTeam);
-            const nearFriendly = playerBuildings.some(b => {
+        if (team === this.playerTeam) {
+            const nearFriendly = this.buildings.some(b => {
+                if (b.team !== this.playerTeam) return false;
                 const dx = x - b.x, dy = y - b.y;
                 return Math.sqrt(dx * dx + dy * dy) <= this.buildRadius;
             });
-            if (!nearFriendly) return false;
-
-            // Cannot build within 350px of any enemy building
+            if (!nearFriendly) return 'Must build within range of your base!';
             const tooCloseToEnemy = this.buildings.some(b => {
                 if (b.team === this.playerTeam) return false;
                 const dx = x - b.x, dy = y - b.y;
                 return Math.sqrt(dx * dx + dy * dy) < 350;
             });
-            if (tooCloseToEnemy) return false;
+            if (tooCloseToEnemy) return 'Too close to enemy territory!';
+        }
+        return null;
+    }
+
+    isValidBuildLocation(x, y, team = this.playerTeam) {
+        return this.getBuildError(x, y, team) === null;
+    }
+
+    // ---- RIVERS ----
+
+    initRivers() {
+        const segDist = (px, py, ax, ay, bx, by) => {
+            const vx = bx - ax, vy = by - ay;
+            const len2 = vx * vx + vy * vy || 1;
+            const t = Math.max(0, Math.min(1, ((px - ax) * vx + (py - ay) * vy) / len2));
+            const cx = ax + vx * t, cy = ay + vy * t;
+            return Math.hypot(px - cx, py - cy);
+        };
+
+        this.rivers = RIVERS.map(r => {
+            const segs = [];
+            for (let i = 0; i < r.points.length - 1; i++) segs.push([r.points[i], r.points[i + 1]]);
+            const bridges = r.bridges.map(([bx, by]) => {
+                // Orient the bridge perpendicular to the nearest stretch of river
+                let best = segs[0], bestD = Infinity;
+                segs.forEach(s => {
+                    const d = segDist(bx, by, s[0][0], s[0][1], s[1][0], s[1][1]);
+                    if (d < bestD) { bestD = d; best = s; }
+                });
+                const tx = best[1][0] - best[0][0], ty = best[1][1] - best[0][1];
+                const tl = Math.hypot(tx, ty) || 1;
+                const t = { x: tx / tl, y: ty / tl };   // along the river
+                const n = { x: -t.y, y: t.x };          // across the river (direction of travel)
+                return { x: bx, y: by, t, n, halfLen: r.halfWidth + 14, halfWidth: 26 };
+            });
+            return { name: r.name, halfWidth: r.halfWidth, points: r.points, segs, bridges };
+        });
+        this.bridges = this.rivers.flatMap(r => r.bridges);
+
+        // Rasterise water into a coarse grid so lookups are O(1)
+        const cs = this.waterCell = 8;
+        this.waterCols = Math.ceil(this.worldWidth / cs);
+        this.waterRows = Math.ceil(this.worldHeight / cs);
+        this.waterGrid = new Uint8Array(this.waterCols * this.waterRows);
+        for (let row = 0; row < this.waterRows; row++) {
+            for (let col = 0; col < this.waterCols; col++) {
+                const x = (col + 0.5) * cs, y = (row + 0.5) * cs;
+                let water = false;
+                for (const r of this.rivers) {
+                    for (const s of r.segs) {
+                        if (segDist(x, y, s[0][0], s[0][1], s[1][0], s[1][1]) < r.halfWidth) { water = true; break; }
+                    }
+                    if (water) break;
+                }
+                if (water) {
+                    // Bridge decks are dry land
+                    for (const b of this.bridges) {
+                        const lx = x - b.x, ly = y - b.y;
+                        if (Math.abs(lx * b.t.x + ly * b.t.y) < b.halfWidth &&
+                            Math.abs(lx * b.n.x + ly * b.n.y) < b.halfLen + 4) { water = false; break; }
+                    }
+                }
+                if (water) this.waterGrid[row * this.waterCols + col] = 1;
+            }
         }
 
+        // Pathfinding graph: a node on each bank at both ends of every bridge
+        this.bridgeNodes = [];
+        this.bridges.forEach(b => {
+            [-1, 1].forEach(side => {
+                let off = b.halfLen + 16;
+                let x = b.x + b.n.x * off * side, y = b.y + b.n.y * off * side;
+                while (this.isWater(x, y) && off < b.halfLen + 80) {
+                    off += 8;
+                    x = b.x + b.n.x * off * side; y = b.y + b.n.y * off * side;
+                }
+                this.bridgeNodes.push({ x, y });
+            });
+        });
+        this.nodeEdges = this.bridgeNodes.map(() => []);
+        for (let i = 0; i < this.bridgeNodes.length; i++) {
+            for (let j = i + 1; j < this.bridgeNodes.length; j++) {
+                const a = this.bridgeNodes[i], b = this.bridgeNodes[j];
+                if (this.lineClear(a.x, a.y, b.x, b.y)) {
+                    const w = Math.hypot(a.x - b.x, a.y - b.y);
+                    this.nodeEdges[i].push({ j, w });
+                    this.nodeEdges[j].push({ j: i, w });
+                }
+            }
+        }
+    }
+
+    isWater(x, y) {
+        if (!this.waterGrid) return false;
+        const col = Math.floor(x / this.waterCell), row = Math.floor(y / this.waterCell);
+        if (col < 0 || row < 0 || col >= this.waterCols || row >= this.waterRows) return false;
+        return this.waterGrid[row * this.waterCols + col] === 1;
+    }
+
+    // Any water inside a w×h box centred on (x, y)?
+    areaHasWater(x, y, w, h) {
+        for (let yy = y - h / 2; yy <= y + h / 2; yy += 6) {
+            for (let xx = x - w / 2; xx <= x + w / 2; xx += 6) {
+                if (this.isWater(xx, yy)) return true;
+            }
+        }
+        return false;
+    }
+
+    nearBridge(x, y, margin) {
+        return this.bridges.some(b => Math.hypot(x - b.x, y - b.y) < b.halfLen + margin);
+    }
+
+    nearestLand(x, y) {
+        if (!this.isWater(x, y)) return { x, y };
+        for (let r = 8; r <= 400; r += 8) {
+            for (let a = 0; a < 16; a++) {
+                const ang = (a / 16) * Math.PI * 2;
+                const nx = x + Math.cos(ang) * r, ny = y + Math.sin(ang) * r;
+                if (!this.isWater(nx, ny)) return { x: nx, y: ny };
+            }
+        }
+        return { x, y };
+    }
+
+    // True if a ground unit could walk in a straight line between the two points
+    lineClear(x0, y0, x1, y1) {
+        const d = Math.hypot(x1 - x0, y1 - y0);
+        const steps = Math.ceil(d / 6);
+        for (let i = 1; i <= steps; i++) {
+            if (i * 6 < 10) continue; // tolerate a start point that's been nudged onto the bank
+            const t = i / steps;
+            if (this.isWater(x0 + (x1 - x0) * t, y0 + (y1 - y0) * t)) return false;
+        }
         return true;
+    }
+
+    // Shortest route via bridges (Dijkstra over bridge-end nodes). Returns a list of
+    // waypoints ending at the goal, or null when the straight line is already clear
+    // (or no crossing exists).
+    findPath(sx, sy, gx, gy) {
+        if (!this.waterGrid || this.lineClear(sx, sy, gx, gy)) return null;
+        const nodes = this.bridgeNodes;
+        const n = nodes.length;
+        const GOAL = n;
+        const dist = new Array(n + 1).fill(Infinity);
+        const prev = new Array(n + 1).fill(-1);
+        const done = new Array(n + 1).fill(false);
+        const goalVis = nodes.map(p => this.lineClear(p.x, p.y, gx, gy));
+        nodes.forEach((p, i) => {
+            if (this.lineClear(sx, sy, p.x, p.y)) dist[i] = Math.hypot(p.x - sx, p.y - sy);
+        });
+        for (;;) {
+            let u = -1, best = Infinity;
+            for (let i = 0; i <= n; i++) if (!done[i] && dist[i] < best) { best = dist[i]; u = i; }
+            if (u === -1 || u === GOAL) break;
+            done[u] = true;
+            for (const e of this.nodeEdges[u]) {
+                if (dist[u] + e.w < dist[e.j]) { dist[e.j] = dist[u] + e.w; prev[e.j] = u; }
+            }
+            if (goalVis[u]) {
+                const w = Math.hypot(nodes[u].x - gx, nodes[u].y - gy);
+                if (dist[u] + w < dist[GOAL]) { dist[GOAL] = dist[u] + w; prev[GOAL] = u; }
+            }
+        }
+        if (dist[GOAL] === Infinity) return null;
+        const path = [{ x: gx, y: gy }];
+        for (let k = prev[GOAL]; k !== -1; k = prev[k]) path.unshift({ x: nodes[k].x, y: nodes[k].y });
+        return path;
+    }
+
+    renderRivers() {
+        const ctx = this.ctx, cam = this.camera;
+        const t = performance.now() / 1000;
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        const trace = r => {
+            ctx.beginPath();
+            r.points.forEach(([x, y], i) => i === 0 ? ctx.moveTo(x - cam.x, y - cam.y) : ctx.lineTo(x - cam.x, y - cam.y));
+        };
+        this.rivers.forEach(r => {
+            // Muddy banks, deep water, lighter channel, then flowing ripples
+            trace(r); ctx.strokeStyle = '#7d6b45'; ctx.lineWidth = r.halfWidth * 2 + 14; ctx.stroke();
+            trace(r); ctx.strokeStyle = '#a08a5a'; ctx.lineWidth = r.halfWidth * 2 + 6; ctx.stroke();
+            trace(r); ctx.strokeStyle = '#1d5583'; ctx.lineWidth = r.halfWidth * 2; ctx.stroke();
+            trace(r); ctx.strokeStyle = '#2b74ad'; ctx.lineWidth = r.halfWidth * 1.2; ctx.stroke();
+            ctx.setLineDash([16, 26]);
+            ctx.lineDashOffset = -t * 28;
+            trace(r); ctx.strokeStyle = 'rgba(255,255,255,0.22)'; ctx.lineWidth = 2; ctx.stroke();
+            ctx.setLineDash([6, 34]);
+            ctx.lineDashOffset = -t * 40 + 11;
+            trace(r); ctx.strokeStyle = 'rgba(190,230,255,0.25)'; ctx.lineWidth = r.halfWidth * 0.9; ctx.stroke();
+            ctx.setLineDash([]);
+        });
+
+        // Bridges: wooden decks with planks and rails
+        this.bridges.forEach(b => {
+            const sx = b.x - cam.x, sy = b.y - cam.y;
+            if (sx < -100 || sy < -100 || sx > cam.width + 100 || sy > cam.height + 100) return;
+            ctx.save();
+            ctx.translate(sx, sy);
+            ctx.rotate(Math.atan2(b.n.y, b.n.x)); // local x-axis runs across the river
+            const L = b.halfLen + 6, W = b.halfWidth;
+            ctx.fillStyle = 'rgba(0,0,0,0.3)';
+            ctx.fillRect(-L + 4, -W + 5, L * 2, W * 2);
+            ctx.fillStyle = '#9C6B3C';
+            ctx.fillRect(-L, -W, L * 2, W * 2);
+            ctx.strokeStyle = '#6D4526';
+            ctx.lineWidth = 1.5;
+            for (let k = -L + 5; k < L; k += 7) {
+                ctx.beginPath(); ctx.moveTo(k, -W); ctx.lineTo(k, W); ctx.stroke();
+            }
+            ctx.fillStyle = '#4E342E';
+            ctx.fillRect(-L, -W - 3, L * 2, 5);
+            ctx.fillRect(-L, W - 2, L * 2, 5);
+            ctx.restore();
+        });
+        ctx.restore();
     }
 
     findSpawnPosition(building, unitSize) {
@@ -3826,8 +4838,8 @@ class Game {
                 const x = building.x + Math.cos(angle) * radius;
                 const y = building.y + Math.sin(angle) * radius;
 
-                // Check if this position is clear
-                let isClear = true;
+                // Check if this position is clear (and on dry land)
+                let isClear = !this.isWater(x, y);
                 for (const unit of this.units) {
                     const dx = x - unit.x;
                     const dy = y - unit.y;
@@ -3857,7 +4869,8 @@ class Game {
         const infoEl = document.getElementById('selected-info');
 
         // Only one General allowed at a time
-        if (type === 'general' && this.units.some(u => u.type === 'general' && u.team === this.playerTeam)) {
+        if (type === 'general' && (this.units.some(u => u.type === 'general' && u.team === this.playerTeam) ||
+                                   this.productionQueue.some(q => q.itemType === 'unit' && q.unitType === 'general'))) {
             infoEl.textContent = '⚠️ You already have a General in the field!';
             infoEl.style.color = '#f44336';
             setTimeout(() => { infoEl.textContent = ''; infoEl.style.color = '#aaa'; }, 2000);
@@ -3995,9 +5008,9 @@ class Game {
         const clickX = e.clientX - rect.left;
         const clickY = e.clientY - rect.top;
 
-        // Convert minimap coordinates to world coordinates
-        const scaleX = this.worldWidth / this.minimapCanvas.width;
-        const scaleY = this.worldHeight / this.minimapCanvas.height;
+        // Convert minimap coordinates to world coordinates (CSS pixels, independent of buffer size)
+        const scaleX = this.worldWidth / rect.width;
+        const scaleY = this.worldHeight / rect.height;
 
         const worldX = clickX * scaleX;
         const worldY = clickY * scaleY;
@@ -4013,15 +5026,56 @@ class Game {
 
     goToBase() {
         const hq = this.buildings.find(b => b.team === this.playerTeam && b.type === 'hq');
-        if (hq) {
-            // Center camera on HQ
-            this.camera.x = hq.x - this.camera.width / 2;
-            this.camera.y = hq.y - this.camera.height / 2;
+        if (hq) this.centerCameraOn(hq.x, hq.y);
+    }
 
-            // Clamp camera to world bounds
-            this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
-            this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
+    centerCameraOn(x, y) {
+        this.camera.x = Math.max(0, Math.min(x - this.camera.width / 2, this.worldWidth - this.camera.width));
+        this.camera.y = Math.max(0, Math.min(y - this.camera.height / 2, this.worldHeight - this.camera.height));
+    }
+
+    // Spread a group move into a loose grid around the clicked point so units
+    // don't all fight over the same spot (and jitter there forever).
+    issueGroupMove(units, x, y, attackMove = false) {
+        const movers = units.filter(u => u.hp > 0 && !u.garrisonedIn);
+        if (movers.length === 0) return;
+        const n = movers.length;
+        const spacing = Math.max(...movers.map(u => u.size)) * 2 + 8;
+        const cols = Math.ceil(Math.sqrt(n));
+        const rows = Math.ceil(n / cols);
+        // Sort into rows by y, then each row by x, so units keep their relative layout and paths don't cross
+        const sorted = movers.slice().sort((a, b) => a.y - b.y);
+        for (let r = 0; r < rows; r++) {
+            const row = sorted.slice(r * cols, (r + 1) * cols).sort((a, b) => a.x - b.x);
+            row.forEach((u, c) => {
+                const ox = (c - (row.length - 1) / 2) * spacing;
+                const oy = (r - (rows - 1) / 2) * spacing;
+                const tx = Math.max(15, Math.min(this.worldWidth - 15, x + ox));
+                const ty = Math.max(15, Math.min(this.worldHeight - 15, y + oy));
+                u.moveTo(tx, ty);
+                if (attackMove) u.attackMove = true;
+            });
         }
+        if (movers.some(u => u.team === this.playerTeam)) {
+            this.addOrderMarker(x, y, attackMove ? '#FF9800' : '#76FF03');
+        }
+    }
+
+    addOrderMarker(x, y, color) {
+        this.orderMarkers.push({ x, y, color, life: 1 });
+        if (this.orderMarkers.length > 8) this.orderMarkers.shift();
+    }
+
+    // Reset per-battle visual/HUD state (shared by startMission and restartGame)
+    resetBattleEffects() {
+        this.craters = [];
+        this.wrecks = [];
+        this.radioMessages = [];
+        this.orderMarkers = [];
+        this.damageFlash = 0;
+        this.controlGroups = {};
+        this.screenShake = { x: 0, y: 0, intensity: 0, duration: 0 };
+        if (this.input) this.input.keysDown.clear();
     }
 
     update(deltaTime) {
@@ -4067,6 +5121,47 @@ class Game {
             particle.update(deltaTime);
         });
 
+        // Burning wrecks — emit fire and smoke until they burn out
+        this.wrecks.forEach(wreck => {
+            wreck.timer -= deltaTime;
+            wreck.emitTimer -= deltaTime;
+            if (wreck.emitTimer <= 0) {
+                wreck.emitTimer = 0.09;
+                const fireColor = Math.random() < 0.5 ? '#FF4500' : '#FF6B00';
+                const fp = new Particle(
+                    wreck.x + (Math.random()-0.5) * wreck.r * 1.5,
+                    wreck.y + (Math.random()-0.5) * wreck.r * 0.5,
+                    fireColor, 2 + Math.random() * 3,
+                    (Math.random()-0.5) * 0.6, -0.8 - Math.random() * 0.8);
+                fp.decay = 0.045;
+                fp.gravity = -0.02; // flames lick upward
+                fp.grow = -0.04;
+                this.particles.push(fp);
+                const grey = Math.floor(30 + Math.random() * 40);
+                const sp = new Particle(
+                    wreck.x + (Math.random()-0.5) * wreck.r,
+                    wreck.y - wreck.r * 0.5,
+                    `rgb(${grey},${grey},${grey})`, 3 + Math.random() * 4,
+                    (Math.random()-0.5) * 0.6, -0.9 - Math.random() * 0.5);
+                sp.decay = 0.008;
+                sp.gravity = -0.005; // smoke rises and drifts
+                sp.grow = 0.06;
+                this.particles.push(sp);
+            }
+        });
+        this.wrecks = this.wrecks.filter(w => w.timer > 0);
+
+        // Radio message timers
+        this.radioMessages.forEach(m => { m.timer -= deltaTime; });
+        this.radioMessages = this.radioMessages.filter(m => m.timer > 0);
+
+        // Damage flash decay
+        if (this.damageFlash > 0) this.damageFlash = Math.max(0, this.damageFlash - deltaTime * 2.5);
+
+        // Order click markers fade out
+        this.orderMarkers.forEach(m => { m.life -= deltaTime * 2; });
+        this.orderMarkers = this.orderMarkers.filter(m => m.life > 0);
+
         // Smoke from damaged units/buildings
         this.smokeTimer -= deltaTime;
         if (this.smokeTimer <= 0) {
@@ -4079,6 +5174,8 @@ class Game {
                         `rgb(${grey},${grey},${grey})`, 3 + Math.random()*3,
                         (Math.random()-0.5)*0.4, -0.8 - Math.random()*0.5);
                     p.decay = 0.012;
+                    p.gravity = -0.005;
+                    p.grow = 0.05;
                     this.particles.push(p);
                 }
             });
@@ -4095,13 +5192,36 @@ class Game {
                             (Math.random()-0.5)*0.5, -1.0 - Math.random()*0.6
                         );
                         p.decay = 0.01;
+                        p.gravity = -0.005;
+                        p.grow = 0.06;
                         this.particles.push(p);
+                    }
+                    // Fire when critically damaged
+                    if (b.hp < b.maxHp * 0.2) {
+                        const fp = new Particle(
+                            b.x + (Math.random()-0.5)*b.width * 0.7,
+                            b.y + (Math.random()-0.5)*b.height * 0.3,
+                            Math.random() < 0.5 ? '#FF4500' : '#FFA500',
+                            3 + Math.random()*3,
+                            (Math.random()-0.5)*0.6, -0.8 - Math.random() * 0.6
+                        );
+                        fp.decay = 0.04;
+                        fp.gravity = -0.02;
+                        fp.grow = -0.04;
+                        this.particles.push(fp);
                     }
                 }
             });
         }
 
         this.ai.update(deltaTime);
+
+        this.missionTime = (this.missionTime || 0) + deltaTime;
+        if (!this.raidWarned && this.cities.length > 0 && this.missionTime >= this.raidDelay - 15) {
+            this.raidWarned = true;
+            this.addRadioMessage('📡 Intel: enemy raiders will hit the towns soon!', '#FFB74D');
+        }
+        this.cities.forEach(c => c.update(deltaTime, this));
 
         // Process production queue
         for (let i = this.productionQueue.length - 1; i >= 0; i--) {
@@ -4127,7 +5247,20 @@ class Game {
                         general: 17
                     };
                     const unitSize = unitSizes[item.unitType] || 12;
-                    const spawnPos = this.findSpawnPosition(item.building, unitSize);
+                    // If the producing building was destroyed, roll out of another one of the same type;
+                    // if none are left, refund the order instead of spawning in the rubble.
+                    let source = item.building;
+                    if (!source || source.hp <= 0 || !this.buildings.includes(source)) {
+                        source = this.buildings.find(b => b.team === this.playerTeam && b.type === item.building.type && b.hp > 0);
+                    }
+                    if (!source) {
+                        this.resources.credits += item.cost;
+                        this.addRadioMessage(`↩ ${item.unitType} order refunded (no ${item.building.type})`, '#FFB74D');
+                        this.productionQueue.splice(i, 1);
+                        this.updateUI();
+                        continue;
+                    }
+                    const spawnPos = this.findSpawnPosition(source, unitSize);
 
                     const unit = createUnit(
                         item.unitType,
@@ -4156,6 +5289,10 @@ class Game {
         this.units.forEach(unit => {
             if (unit.hp <= 0) {
                 this.createExplosion(unit.x, unit.y, unit.size, unit.color);
+                this.addWreck(unit.x, unit.y, unit.size >= 18);
+                if (unit.team === this.playerTeam) {
+                    this.addRadioMessage('⚠ Unit lost!', '#FF6B6B');
+                }
             }
         });
 
@@ -4163,9 +5300,13 @@ class Game {
         this.buildings.forEach(building => {
             if (building.hp <= 0) {
                 this.createExplosion(building.x, building.y, building.width, building.color);
+                this.addWreck(building.x, building.y, true);
                 if (building.garrison && building.garrison.length > 0) {
                     building.garrison.forEach(u => { u.hp = 0; u.garrisonedIn = null; });
                     building.garrison = [];
+                }
+                if (building.team === this.playerTeam) {
+                    this.addRadioMessage('☢ Building destroyed!', '#FF1744');
                 }
             }
         });
@@ -4174,6 +5315,12 @@ class Game {
         this.shockwaves.forEach(s => s.update(deltaTime));
 
         this.units = this.units.filter(unit => unit.hp > 0);
+
+        // Drop dead units from the selection so counts and commands stay accurate
+        if (this.selectedUnits.some(u => u.hp <= 0)) {
+            this.selectedUnits = this.selectedUnits.filter(u => u.hp > 0);
+            this.updateUI();
+        }
 
         // Clear selected building reference if it was destroyed
         if (this.selectedBuilding && this.selectedBuilding.hp <= 0) {
@@ -4185,6 +5332,8 @@ class Game {
         this.buildings = this.buildings.filter(building => building.hp > 0);
         this.projectiles = this.projectiles.filter(projectile => !projectile.dead);
         this.particles = this.particles.filter(particle => particle.life > 0);
+        // Cap particle count so huge battles (wrecks + smoke + nukes) don't tank the frame rate
+        if (this.particles.length > 2500) this.particles.splice(0, this.particles.length - 2500);
         this.nukes = this.nukes.filter(n => !n.dead);
         this.shockwaves = this.shockwaves.filter(s => s.life > 0);
 
@@ -4215,6 +5364,25 @@ class Game {
                 this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
                 this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
             }
+        }
+
+        // Smooth arrow-key scrolling while keys are held
+        const keys = this.input.keysDown;
+        if (keys.size > 0) {
+            const kSpeed = 700 * deltaTime;
+            if (keys.has('ArrowLeft'))  this.camera.x -= kSpeed;
+            if (keys.has('ArrowRight')) this.camera.x += kSpeed;
+            if (keys.has('ArrowUp'))    this.camera.y -= kSpeed;
+            if (keys.has('ArrowDown'))  this.camera.y += kSpeed;
+            this.camera.x = Math.max(0, Math.min(this.camera.x, this.worldWidth - this.camera.width));
+            this.camera.y = Math.max(0, Math.min(this.camera.y, this.worldHeight - this.camera.height));
+        }
+
+        // Live HUD refresh (credits drain from repairs, queue progress bars, button affordability)
+        this.uiRefreshTimer -= deltaTime;
+        if (this.uiRefreshTimer <= 0) {
+            this.uiRefreshTimer = 0.2;
+            this.refreshLiveUI();
         }
 
         this.updateFog();
@@ -4295,7 +5463,9 @@ class Game {
     // ---- FOG OF WAR ----
 
     resetFog() {
-        this.playerFog.fill(0);
+        // The whole map starts revealed for the player (terrain, towns and enemy base are known);
+        // enemy units are still only shown where your forces can currently see.
+        this.playerFog.fill(1);
         this.enemyFog.fill(0);
     }
 
@@ -4333,6 +5503,9 @@ class Game {
             const grid = b.team === this.playerTeam ? this.playerFog : this.enemyFog;
             this.markFogVisible(b.x, b.y, b.visionRadius || 160, grid);
         });
+        // Whole map revealed for the player: everything (including enemy units) is always
+        // visible and nothing is dimmed. The enemy AI still has to scout with its own fog.
+        if (this.revealWholeMap) this.playerFog.fill(2);
     }
 
     fogStateAt(worldX, worldY, grid) {
@@ -4358,25 +5531,38 @@ class Game {
         return this.fogStateAt(worldX, worldY, this.enemyFog) >= 1;
     }
 
-    renderFog() {
-        const ts = this.fogTileSize;
-        const cam = this.camera;
-        const ctx = this.ctx;
-
-        const startTX = Math.max(0, Math.floor(cam.x / ts));
-        const endTX   = Math.min(this.fogCols - 1, Math.ceil((cam.x + cam.width)  / ts));
-        const startTY = Math.max(0, Math.floor(cam.y / ts));
-        const endTY   = Math.min(this.fogRows - 1, Math.ceil((cam.y + cam.height) / ts));
-
-        for (let ty = startTY; ty <= endTY; ty++) {
-            for (let tx = startTX; tx <= endTX; tx++) {
-                if (this.playerFog[ty * this.fogCols + tx] !== 0) continue; // explored = permanently clear
-                const sx = tx * ts - cam.x;
-                const sy = ty * ts - cam.y;
-                ctx.fillStyle = '#000000';
-                ctx.fillRect(sx, sy, ts + 1, ts + 1);
-            }
+    // Build a tiny 1-pixel-per-tile fog texture. Drawing it scaled up with image
+    // smoothing gives soft, feathered fog edges for almost no cost, and lets us
+    // dim "explored but not currently visible" ground (classic RTS shroud).
+    updateFogTexture() {
+        if (!this.fogCanvas) {
+            this.fogCanvas = document.createElement('canvas');
+            this.fogCanvas.width = this.fogCols;
+            this.fogCanvas.height = this.fogRows;
+            this.fogTexCtx = this.fogCanvas.getContext('2d');
+            this.fogImage = this.fogTexCtx.createImageData(this.fogCols, this.fogRows);
         }
+        const data = this.fogImage.data;
+        const fog = this.playerFog;
+        for (let i = 0; i < fog.length; i++) {
+            const s = fog[i];
+            const o = i * 4;
+            data[o] = 4; data[o + 1] = 6; data[o + 2] = 10; // near-black with a cool tint
+            // The whole map is revealed now, so keep the "not currently seen" shroud light
+            data[o + 3] = s === 0 ? 255 : s === 1 ? 70 : 0;
+        }
+        this.fogTexCtx.putImageData(this.fogImage, 0, 0);
+    }
+
+    renderFog() {
+        this.updateFogTexture();
+        const ts = this.fogTileSize;
+        const ctx = this.ctx;
+        ctx.save();
+        ctx.imageSmoothingEnabled = true;
+        ctx.imageSmoothingQuality = 'high';
+        ctx.drawImage(this.fogCanvas, -this.camera.x, -this.camera.y, this.fogCols * ts, this.fogRows * ts);
+        ctx.restore();
     }
 
     // ---- END FOG OF WAR ----
@@ -4385,20 +5571,28 @@ class Game {
         const playerHQ = this.buildings.find(b => b.team === this.playerTeam && b.type === 'hq');
         const enemyHQ = this.buildings.find(b => b.team === this.enemyTeam && b.type === 'hq');
 
+        const allCitiesFallen = this.cities.length > 0 && this.cities.every(c => c.fallen);
+
         if (!playerHQ && this.gameState === 'playing') {
             this.gameState = 'lost';
             this.showGameEndScreen('DEFEAT', 'Your HQ has been destroyed!', '#f44336', false);
+        } else if (allCitiesFallen && this.gameState === 'playing') {
+            this.gameState = 'lost';
+            this.showGameEndScreen('DEFEAT', 'Every town has fallen. There is no one left to protect.', '#f44336', false);
         } else if (!enemyHQ && this.gameState === 'playing') {
             this.gameState = 'won';
             if (this.currentMission) {
-                const completed = JSON.parse(localStorage.getItem('titanwar_completed') || '[]');
+                const completed = this.getCompletedMissions();
                 if (!completed.includes(this.currentMission.id)) {
                     completed.push(this.currentMission.id);
-                    localStorage.setItem('titanwar_completed', JSON.stringify(completed));
+                    try { localStorage.setItem('titanwar_completed', JSON.stringify(completed)); } catch (e) { /* storage blocked */ }
                 }
             }
             const hasNext = this.currentMission && this.currentMission.id < MISSIONS.length;
-            this.showGameEndScreen('VICTORY', 'Enemy HQ destroyed!', '#4CAF50', hasNext);
+            const saved = this.cities.reduce((s, c) => s + c.population, 0);
+            const total = this.cities.reduce((s, c) => s + c.initialPop, 0);
+            const civLine = total > 0 ? `<br><span style="font-size:18px;color:#B3E5FC;">🏘 Civilians saved: ${saved}/${total}</span>` : '';
+            this.showGameEndScreen('VICTORY', 'Enemy HQ destroyed!' + civLine, '#4CAF50', hasNext);
         }
     }
 
@@ -4476,6 +5670,7 @@ class Game {
         this.nukeTargeting = false;
         this.productionQueue = [];
         this.resources.credits = 2000;
+        this.resetBattleEffects();
 
         // Reset AI
         this.ai.credits = 1000;
@@ -4494,9 +5689,51 @@ class Game {
         this.goToBase();
     }
 
+    // Switch fog of war on/off for the player and refresh every fog button
+    toggleFog() {
+        this.revealWholeMap = !this.revealWholeMap;
+        // Turning fog on: everything you can't currently see becomes dim/hidden again
+        if (!this.revealWholeMap) this.playerFog.fill(1);
+        this.updateFog();
+        try { localStorage.setItem('titanwar_reveal_map', this.revealWholeMap ? '1' : '0'); } catch (e) {}
+        this.updateFogButtons();
+    }
+
+    updateFogButtons() {
+        const text = this.revealWholeMap ? '🌫 Fog of War: OFF (whole map visible)' : '🌫 Fog of War: ON';
+        const bg = this.revealWholeMap ? '#37474F' : '#4A148C';
+        ['fog-toggle-btn', 'campaign-fog-btn'].forEach(id => {
+            const b = document.getElementById(id);
+            if (b) { b.textContent = text; b.style.background = bg; }
+        });
+    }
+
+    // Completed mission ids from localStorage (tolerates missing/corrupt data or blocked storage)
+    getCompletedMissions() {
+        try {
+            const v = JSON.parse(localStorage.getItem('titanwar_completed') || '[]');
+            return Array.isArray(v) ? v : [];
+        } catch (e) {
+            return [];
+        }
+    }
+
+    resumeBattle() {
+        const overlay = document.getElementById('campaign-overlay');
+        if (overlay) overlay.remove();
+        if (this.pausedFromBattle) this.gameState = 'playing';
+        this.pausedFromBattle = false;
+    }
+
     showCampaignScreen() {
+        // Never stack two menus (a leftover one would sit over the game after starting a mission)
+        const existing = document.getElementById('campaign-overlay');
+        if (existing) existing.remove();
+        // Remember if we came here mid-battle so the player can go back to it
+        if (this.gameState === 'playing') this.pausedFromBattle = true;
         this.gameState = 'campaign';
-        const completed = JSON.parse(localStorage.getItem('titanwar_completed') || '[]');
+        this.input.keysDown.clear();
+        const completed = this.getCompletedMissions();
 
         const overlay = document.createElement('div');
         overlay.id = 'campaign-overlay';
@@ -4508,7 +5745,8 @@ class Game {
             const isUnlocked = i === 0 || completed.includes(MISSIONS[i - 1].id);
             const isDone = completed.includes(m.id);
             const dColor = diffColors[m.difficulty] || '#fff';
-            return `<div onclick="window._game.startMission(${m.id})" style="background:${isUnlocked ? '#1e1e1e' : '#111'};border:2px solid ${isUnlocked ? dColor : '#333'};border-radius:8px;padding:clamp(12px,2vh,24px) clamp(14px,2vw,28px);margin:clamp(4px,0.6vmin,10px);cursor:${isUnlocked ? 'pointer' : 'default'};opacity:${isUnlocked ? 1 : 0.45};min-width:clamp(180px,18vw,300px);max-width:clamp(200px,22vw,340px);flex:1;transition:all 0.2s;" onmouseover="if(${isUnlocked})this.style.background='#2a2a2a'" onmouseout="this.style.background='${isUnlocked ? '#1e1e1e' : '#111'}'">
+            // Locked missions must not be clickable
+            return `<div ${isUnlocked ? `onclick="window._game.startMission(${m.id})"` : ''} style="background:${isUnlocked ? '#1e1e1e' : '#111'};border:2px solid ${isUnlocked ? dColor : '#333'};border-radius:8px;padding:clamp(12px,2vh,24px) clamp(14px,2vw,28px);margin:clamp(4px,0.6vmin,10px);cursor:${isUnlocked ? 'pointer' : 'default'};opacity:${isUnlocked ? 1 : 0.45};min-width:clamp(180px,18vw,300px);max-width:clamp(200px,22vw,340px);flex:1;transition:all 0.2s;" onmouseover="if(${isUnlocked})this.style.background='#2a2a2a'" onmouseout="this.style.background='${isUnlocked ? '#1e1e1e' : '#111'}'">
                 <div style="color:${dColor};font-weight:bold;font-size:clamp(11px,1.4vmin,18px);letter-spacing:1px;">${m.difficulty} ${isDone ? '✓' : ''}</div>
                 <div style="color:#fff;font-size:clamp(15px,2vmin,26px);font-weight:bold;margin:clamp(3px,0.5vmin,8px) 0;">${m.id}. ${m.name}</div>
                 <div style="color:#aaa;font-size:clamp(10px,1.2vmin,16px);">${isUnlocked ? m.description : '🔒 Complete previous mission to unlock'}</div>
@@ -4520,11 +5758,14 @@ class Game {
                 <h1 style="color:#FF5722;font-size:clamp(32px,6vmin,80px);margin:0 0 clamp(4px,0.8vmin,12px);text-shadow:0 0 16px #FF5722;">TITAN WAR</h1>
                 <p style="color:#888;font-size:clamp(11px,1.5vmin,20px);margin:0 0 clamp(16px,3vmin,40px);letter-spacing:2px;">CAMPAIGN</p>
                 <div style="display:flex;flex-wrap:wrap;justify-content:center;">${missionCards}</div>
-                <button onclick="document.getElementById('campaign-overlay').remove();window._game.startMission(1)" style="margin-top:clamp(14px,2.5vmin,32px);background:#263238;color:#aaa;border:1px solid #444;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">Quick Start (Mission 1)</button>
+                ${this.pausedFromBattle ? `<button onclick="window._game.resumeBattle()" style="margin-top:clamp(14px,2.5vmin,32px);margin-right:10px;background:#1B5E20;color:#fff;border:1px solid #4CAF50;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">⟵ Back to Battle</button>` : ''}
+                <button id="campaign-fog-btn" onclick="window._game.toggleFog()" style="margin-top:clamp(14px,2.5vmin,32px);margin-right:10px;background:#37474F;color:#fff;border:1px solid #607D8B;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">🌫 Fog of War</button>
+                <button onclick="window._game.startMission(1)" style="margin-top:clamp(14px,2.5vmin,32px);background:#263238;color:#aaa;border:1px solid #444;padding:clamp(8px,1.2vmin,16px) clamp(18px,3vw,36px);font-size:clamp(12px,1.5vmin,20px);border-radius:4px;cursor:pointer;width:auto;">Quick Start (Mission 1)</button>
             </div>`;
 
         document.body.appendChild(overlay);
         window._game = this;
+        this.updateFogButtons();
     }
 
     startMission(missionId) {
@@ -4538,6 +5779,7 @@ class Game {
 
         this.currentMission = mission;
         this.gameState = 'playing';
+        this.pausedFromBattle = false;
         this.units = [];
         this.buildings = [];
         this.projectiles = [];
@@ -4550,6 +5792,7 @@ class Game {
         this.commandMode = null;
         this.nukeTargeting = false;
         this.productionQueue = [];
+        this.resetBattleEffects();
 
         this.ai.credits = 0;
         this.ai.updateTimer = 0;
@@ -4653,11 +5896,40 @@ class Game {
         }
     }
 
-    createExplosion(x, y, size, baseColor) {
-        // Screen shake
-        if (size >= 60) this.addShake(8, 0.3);
-        else if (size >= 20) this.addShake(3, 0.15);
-        else this.addShake(1, 0.08);
+    addCrater(x, y, radius) {
+        this.craters.push({ x, y, r: Math.max(10, radius * 0.9) });
+        if (this.craters.length > 80) this.craters.shift();
+    }
+
+    addWreck(x, y, large = false) {
+        this.wrecks.push({ x, y, timer: large ? 14 : 7, maxTimer: large ? 14 : 7, emitTimer: 0, r: large ? 20 : 10 });
+    }
+
+    addRadioMessage(text, color = '#FFD700') {
+        if (this.radioMessages.length > 0 && this.radioMessages[0].text === text) return;
+        this.radioMessages.unshift({ text, timer: 3.5, maxTimer: 3.5, color });
+        if (this.radioMessages.length > 4) this.radioMessages.pop();
+    }
+
+    createExplosion(x, y, size, baseColor, leaveCrater = true) {
+        // Screen shake — only for blasts the player can actually see
+        const onScreen = x > this.camera.x - 100 && x < this.camera.x + this.camera.width + 100 &&
+                         y > this.camera.y - 100 && y < this.camera.y + this.camera.height + 100;
+        if (onScreen) {
+            if (size >= 60) this.addShake(8, 0.3);
+            else if (size >= 20) this.addShake(3, 0.15);
+            else this.addShake(1, 0.08);
+        }
+
+        // Permanent crater on the ground (skipped for mid-air blasts like intercepts)
+        if (leaveCrater) this.addCrater(x, y, size);
+
+        // Brief bright flash at the core
+        const flash = new Particle(x, y, '#FFF8E1', size * 0.6 + 6, 0, 0);
+        flash.gravity = 0;
+        flash.decay = 0.12;
+        flash.grow = 1.2;
+        this.particles.push(flash);
 
         const count = Math.floor(8 + size * 0.8);
         // Fireball core
@@ -4676,6 +5948,8 @@ class Game {
             const grey = Math.floor(30 + Math.random() * 50);
             const p = new Particle(x, y, `rgb(${grey},${grey},${grey})`, 4 + Math.random() * (size * 0.12), Math.cos(angle)*spd, Math.sin(angle)*spd - 1.5);
             p.decay = 0.008 + Math.random() * 0.01;
+            p.gravity = 0.01; // billowing smoke slows and hangs rather than falling
+            p.grow = 0.08;
             this.particles.push(p);
         }
         // Flying debris chunks
@@ -4726,11 +6000,52 @@ class Game {
             }
         }
 
-        // Draw static decorations (rocks, dirt patches, trees)
-        this.drawDecorations();
+        // Rivers and bridges sit on the ground layer, under craters, trees and units
+        this.renderRivers();
+
+        // Draw persistent shell craters
+        this.craters.forEach(c => {
+            const sx = c.x - this.camera.x;
+            const sy = c.y - this.camera.y;
+            if (sx < -c.r*2 || sx > this.camera.width + c.r*2 ||
+                sy < -c.r*2 || sy > this.camera.height + c.r*2) return;
+            const grad = this.ctx.createRadialGradient(sx, sy, 0, sx, sy, c.r);
+            grad.addColorStop(0, 'rgba(15,8,0,0.85)');
+            grad.addColorStop(0.55, 'rgba(30,18,5,0.6)');
+            grad.addColorStop(1, 'rgba(0,0,0,0)');
+            this.ctx.fillStyle = grad;
+            this.ctx.beginPath();
+            this.ctx.arc(sx, sy, c.r, 0, Math.PI * 2);
+            this.ctx.fill();
+        });
+
+        // Draw charred circles for burning wrecks
+        this.wrecks.forEach(w => {
+            const sx = w.x - this.camera.x;
+            const sy = w.y - this.camera.y;
+            const alpha = Math.min(1, w.timer / w.maxTimer) * 0.7;
+            this.ctx.save();
+            this.ctx.globalAlpha = alpha;
+            this.ctx.fillStyle = '#1a1000';
+            this.ctx.beginPath();
+            this.ctx.arc(sx, sy, w.r, 0, Math.PI * 2);
+            this.ctx.fill();
+            this.ctx.restore();
+        });
 
         // Viewport culling - only render visible entities
         const buffer = 100;
+        const cityOnScreen = c => c.x > this.camera.x - c.radius - buffer &&
+            c.x < this.camera.x + this.camera.width + c.radius + buffer &&
+            c.y > this.camera.y - c.radius - buffer &&
+            c.y < this.camera.y + this.camera.height + c.radius + buffer;
+        const visibleCities = this.cities.filter(cityOnScreen);
+
+        // Town plazas sit on the ground, under trees and units
+        visibleCities.forEach(c => c.renderGround(this.ctx, this.camera));
+
+        // Draw static decorations (rocks, dirt patches, trees)
+        this.drawDecorations();
 
         this.resourceDeposits.forEach(deposit => {
             if (deposit.amount > 0 &&
@@ -4754,6 +6069,12 @@ class Game {
                 }
                 building.render(this.ctx, this.camera);
             }
+        });
+
+        // Town houses (back-to-front so lower houses overlap upper ones) and their people
+        visibleCities.forEach(c => {
+            c.houses.slice().sort((a, b) => a.y - b.y).forEach(h => h.render(this.ctx, this.camera));
+            c.civilians.forEach(p => p.render(this.ctx, this.camera));
         });
 
         this.units.forEach(unit => {
@@ -4809,6 +6130,32 @@ class Game {
 
         this.renderFog();
 
+        // Town name / population tags on top of the fog so they're always readable
+        visibleCities.forEach(c => c.renderLabel(this.ctx, this.camera));
+
+        // Red vignette when player takes damage
+        if (this.damageFlash > 0) {
+            const vx = this.camera.width / 2, vy = this.camera.height / 2;
+            const vgrad = this.ctx.createRadialGradient(vx, vy, this.camera.height * 0.25, vx, vy, this.camera.height);
+            vgrad.addColorStop(0, 'rgba(180,0,0,0)');
+            vgrad.addColorStop(1, `rgba(200,0,0,${(this.damageFlash * 0.45).toFixed(3)})`);
+            this.ctx.fillStyle = vgrad;
+            this.ctx.fillRect(0, 0, this.camera.width, this.camera.height);
+        }
+
+        // Order feedback: shrinking ring where a move/attack order was given
+        this.orderMarkers.forEach(m => {
+            const mx = m.x - this.camera.x, my = m.y - this.camera.y;
+            this.ctx.save();
+            this.ctx.globalAlpha = Math.max(0, m.life);
+            this.ctx.strokeStyle = m.color;
+            this.ctx.lineWidth = 2;
+            this.ctx.beginPath();
+            this.ctx.ellipse(mx, my, 6 + 16 * m.life, (6 + 16 * m.life) * 0.55, 0, 0, Math.PI * 2);
+            this.ctx.stroke();
+            this.ctx.restore();
+        });
+
         this.input.renderSelection(this.ctx, this.camera);
 
         if (this.buildMode) {
@@ -4826,6 +6173,59 @@ class Game {
 
         this.ctx.restore(); // End viewport scale
 
+        // Radio chatter HUD — drawn in canvas pixel space
+        if (this.radioMessages.length > 0) {
+            const cw = this.canvas.width, pad = 12;
+            this.ctx.save();
+            this.ctx.font = `bold ${Math.max(12, Math.floor(this.canvas.height * 0.022))}px monospace`;
+            this.radioMessages.forEach((msg, i) => {
+                const alpha = Math.min(1, msg.timer / 0.6);
+                const tw = this.ctx.measureText(msg.text).width;
+                const bx = cw - tw - pad * 2 - 4;
+                const by = 8 + i * (Math.floor(this.canvas.height * 0.03) + 4);
+                const bh = Math.floor(this.canvas.height * 0.03);
+                this.ctx.globalAlpha = alpha * 0.75;
+                this.ctx.fillStyle = '#000';
+                this.ctx.fillRect(bx - 4, by, tw + pad * 2 + 8, bh + 4);
+                this.ctx.globalAlpha = alpha;
+                this.ctx.fillStyle = msg.color;
+                this.ctx.fillText(msg.text, bx + pad, by + bh - 2);
+            });
+            this.ctx.restore();
+        }
+
+        // Towns status panel (top-left). Click-free overview of who needs help.
+        if (this.cities.length > 0 && this.gameState === 'playing') {
+            const fs = Math.max(12, Math.floor(this.canvas.height * 0.02));
+            const lineH = fs + 6;
+            this.ctx.save();
+            this.ctx.font = `bold ${fs}px Arial`;
+            const lines = this.cities.map(c => ({
+                c,
+                text: c.fallen ? `☠ ${c.name} — fallen` : `🏘 ${c.name}  ${c.population}/${c.initialPop}${c.underAttackTimer > 0 ? '  ⚠ ATTACK' : ''}`
+            }));
+            const secsLeft = Math.ceil((this.raidDelay || 0) - (this.missionTime || 0));
+            const title = secsLeft > 0 ? `TOWNS TO PROTECT — raids in ${secsLeft}s` : 'TOWNS TO PROTECT';
+            const w = Math.max(this.ctx.measureText(title).width, ...lines.map(l => this.ctx.measureText(l.text).width)) + 20;
+            const h = lineH * (lines.length + 1) + 8;
+            this.ctx.fillStyle = 'rgba(0,0,0,0.6)';
+            const py = this.canvas.height - h - 8; // bottom-left, clear of the starting base
+            this.ctx.fillRect(8, py, w, h);
+            this.ctx.strokeStyle = 'rgba(179,229,252,0.5)';
+            this.ctx.lineWidth = 1;
+            this.ctx.strokeRect(8, py, w, h);
+            this.ctx.fillStyle = '#B3E5FC';
+            this.ctx.fillText(title, 18, py + lineH);
+            lines.forEach((l, i) => {
+                const attacked = l.c.underAttackTimer > 0 && !l.c.fallen;
+                this.ctx.fillStyle = l.c.fallen ? '#9E9E9E'
+                    : attacked ? (Math.sin(Date.now() / 120) > 0 ? '#FF5252' : '#FFAB91')
+                    : l.c.population < l.c.initialPop * 0.5 ? '#FFB74D' : '#C8E6C9';
+                this.ctx.fillText(l.text, 18, py + lineH * (i + 2));
+            });
+            this.ctx.restore();
+        }
+
         this.renderMinimap();
     }
 
@@ -4834,13 +6234,38 @@ class Game {
         const width = this.minimapCanvas.width;
         const height = this.minimapCanvas.height;
 
-        // Clear minimap
-        ctx.fillStyle = '#1a1a1a';
+        // Terrain-coloured background so the minimap reads like the map
+        ctx.fillStyle = '#2f5a1a';
         ctx.fillRect(0, 0, width, height);
 
         // Calculate scale
         const scaleX = width / this.worldWidth;
         const scaleY = height / this.worldHeight;
+
+        // Rivers and bridges
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        ctx.strokeStyle = '#2b74ad';
+        this.rivers.forEach(r => {
+            ctx.lineWidth = Math.max(2, r.halfWidth * 2 * scaleX);
+            ctx.beginPath();
+            r.points.forEach(([x, y], i) => i === 0 ? ctx.moveTo(x * scaleX, y * scaleY) : ctx.lineTo(x * scaleX, y * scaleY));
+            ctx.stroke();
+        });
+        ctx.fillStyle = '#C8A26B';
+        this.bridges.forEach(b => ctx.fillRect(b.x * scaleX - 2.5, b.y * scaleY - 2.5, 5, 5));
+        ctx.restore();
+
+        // Fog (same soft texture as the main view) drawn under the markers so dots stay bright
+        if (this.fogCanvas) {
+            ctx.save();
+            ctx.imageSmoothingEnabled = true;
+            ctx.globalAlpha = 0.9;
+            ctx.drawImage(this.fogCanvas, 0, 0,
+                this.fogCols * this.fogTileSize * scaleX, this.fogRows * this.fogTileSize * scaleY);
+            ctx.restore();
+        }
 
         // Draw resource deposits (only if explored)
         ctx.fillStyle = '#FFD700';
@@ -4861,27 +6286,29 @@ class Game {
             ctx.fillRect(x - 2, y - 2, 4, 4);
         });
 
+        // Towns: light-blue blocks, flashing red while under attack
+        this.cities.forEach(c => {
+            const flash = c.underAttackTimer > 0 && !c.fallen && Math.sin(Date.now() / 150) > 0;
+            ctx.fillStyle = c.fallen ? '#616161' : flash ? '#FF1744' : '#81D4FA';
+            c.houses.forEach(h => ctx.fillRect(h.x * scaleX - 1.5, h.y * scaleY - 1.5, 3, 3));
+            if (!c.fallen) {
+                ctx.strokeStyle = flash ? '#FF1744' : 'rgba(129,212,250,0.6)';
+                ctx.lineWidth = 1;
+                ctx.beginPath();
+                ctx.arc(c.x * scaleX, c.y * scaleY, c.radius * scaleX, 0, Math.PI * 2);
+                ctx.stroke();
+            }
+        });
+
         // Draw units (fog-aware — enemy only shown when currently visible)
         this.units.forEach(unit => {
+            if (unit.garrisonedIn) return;
             if (unit.team !== this.playerTeam && !this.isVisibleToPlayer(unit.x, unit.y)) return;
             ctx.fillStyle = unit.team === this.playerTeam ? '#88ff88' : '#ff8888';
             const x = unit.x * scaleX;
             const y = unit.y * scaleY;
             ctx.fillRect(x - 1, y - 1, 2, 2);
         });
-
-        // Fog overlay on minimap — only unexplored tiles are darkened
-        const ts = this.fogTileSize;
-        ctx.fillStyle = 'rgba(0,0,0,0.82)';
-        for (let ty = 0; ty < this.fogRows; ty++) {
-            for (let tx = 0; tx < this.fogCols; tx++) {
-                if (this.playerFog[ty * this.fogCols + tx] !== 0) continue;
-                ctx.fillRect(
-                    tx * ts * scaleX, ty * ts * scaleY,
-                    ts * scaleX + 1, ts * scaleY + 1
-                );
-            }
-        }
 
         // Draw camera viewport
         ctx.strokeStyle = '#ffffff';
@@ -5055,7 +6482,9 @@ class Game {
             const y = rng() * this.worldHeight;
             const nearPlayerBase = x < 500 && y < 500;
             const nearEnemyBase = x > 2100 && y > 1200;
-            if (nearPlayerBase || nearEnemyBase) continue;
+            const inTown = CITY_SITES.some(c => Math.abs(x - c.x) < 140 && Math.abs(y - c.y) < 120);
+            const wet = this.areaHasWater(x, y, 50, 50) || this.nearBridge(x, y, 30);
+            if (nearPlayerBase || nearEnemyBase || inTown || wet) continue;
             const r = 12 + rng() * 10;
             const g1 = Math.floor(80 + rng()*50);
             const g2 = Math.floor(100 + rng()*60);
@@ -5063,6 +6492,9 @@ class Game {
                 dark: `rgb(20,${g1},20)`, light: `rgb(30,${g2},30)` });
             treesPlaced++;
         }
+        // No rocks or dirt patches floating in the rivers
+        this.decorations = this.decorations.filter(d =>
+            d.type === 'tree' || (!this.areaHasWater(d.x, d.y, 30, 30) && !this.nearBridge(d.x, d.y, 20)));
     }
 
     drawDecorations() {
@@ -5115,10 +6547,6 @@ class Game {
     }
 
     updateUI() {
-        document.getElementById('credits').textContent = Math.floor(this.resources.credits);
-        document.getElementById('power').textContent =
-            `${this.resources.power}/${this.resources.maxPower}`;
-
         let info = '';
         if (this.nukeTargeting) {
             info = '☢ Click target location for nuclear strike — Escape or Right-click to cancel';
@@ -5154,9 +6582,19 @@ class Game {
                 info = `${b.type} — ${Math.ceil(b.hp)}/${b.maxHp} HP (${hpPct}%)`;
             }
         } else {
-            info = 'Left-click to select  |  Right-click to move+deselect  |  Drag to box-select';
+            info = 'Left-click to select  |  Right-click to move+deselect  |  Drag to box-select  |  Ctrl/Shift+1-9: group';
         }
         document.getElementById('selected-info').textContent = info;
+
+        this.refreshLiveUI();
+    }
+
+    // Parts of the HUD that change continuously. Safe to call every few frames:
+    // unlike updateUI() it never overwrites the info bar (and its temporary warnings).
+    refreshLiveUI() {
+        document.getElementById('credits').textContent = Math.floor(this.resources.credits);
+        document.getElementById('power').textContent =
+            `${this.resources.power}/${this.resources.maxPower}`;
 
         // Update unit button states based on building requirements
         const hasBarracks = this.buildings.some(b => b.team === this.playerTeam && b.type === 'barracks');
