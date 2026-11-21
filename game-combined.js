@@ -4430,7 +4430,8 @@ class Game {
         this.productionQueue = [];
 
         // Building placement restrictions
-        this.buildRadius = 200; // Buildings must be within 200 pixels of existing buildings
+        this.buildRadius = 200; // Buildings must be within 200 pixels of existing buildings (only when freeBuildPlacement is off)
+        this.freeBuildPlacement = true; // build anywhere on the map (still not on water, mountains, towns, bridges or other buildings)
 
         this.resourceDeposits = [];
 
@@ -4886,7 +4887,7 @@ class Game {
         if (this.areaHasWater(x, y, newBuildingSize, newBuildingSize)) return 'Cannot build on water or mountains!';
         if (this.nearBridge(x, y, 40)) return 'Cannot block a bridge!';
 
-        if (team === this.playerTeam) {
+        if (team === this.playerTeam && !this.freeBuildPlacement) {
             const nearFriendly = this.buildings.some(b => {
                 if (b.team !== this.playerTeam) return false;
                 const dx = x - b.x, dy = y - b.y;
@@ -6936,21 +6937,24 @@ class Game {
         this.ctx.setLineDash([5, 5]);
         this.ctx.lineWidth = 2;
 
-        // Green build-radius rings around friendly buildings
-        this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.25)';
-        this.buildings.filter(b => b.team === this.playerTeam).forEach(b => {
-            this.ctx.beginPath();
-            this.ctx.arc(b.x - this.camera.x, b.y - this.camera.y, this.buildRadius, 0, Math.PI * 2);
-            this.ctx.stroke();
-        });
+        // Range rings only matter when placement is restricted
+        if (!this.freeBuildPlacement) {
+            // Green build-radius rings around friendly buildings
+            this.ctx.strokeStyle = 'rgba(0, 255, 0, 0.25)';
+            this.buildings.filter(b => b.team === this.playerTeam).forEach(b => {
+                this.ctx.beginPath();
+                this.ctx.arc(b.x - this.camera.x, b.y - this.camera.y, this.buildRadius, 0, Math.PI * 2);
+                this.ctx.stroke();
+            });
 
-        // Red exclusion rings around enemy buildings
-        this.ctx.strokeStyle = 'rgba(255, 50, 50, 0.3)';
-        this.buildings.filter(b => b.team !== this.playerTeam).forEach(b => {
-            this.ctx.beginPath();
-            this.ctx.arc(b.x - this.camera.x, b.y - this.camera.y, 350, 0, Math.PI * 2);
-            this.ctx.stroke();
-        });
+            // Red exclusion rings around enemy buildings
+            this.ctx.strokeStyle = 'rgba(255, 50, 50, 0.3)';
+            this.buildings.filter(b => b.team !== this.playerTeam).forEach(b => {
+                this.ctx.beginPath();
+                this.ctx.arc(b.x - this.camera.x, b.y - this.camera.y, 350, 0, Math.PI * 2);
+                this.ctx.stroke();
+            });
+        }
 
         this.ctx.setLineDash([]);
 
