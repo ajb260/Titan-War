@@ -3785,12 +3785,29 @@ const RIVERS = [
     }
 ];
 
+// ========== MOUNTAINS ==========
+// A ring of impassable ridges around the player's base. Ground units must use the
+// three passes (gaps between ridges); helicopters fly over. Each ridge is a polyline
+// with a half-width; ends that run past the map edge seal the ring against the border.
+const MOUNTAIN_RIDGES = [
+    { halfWidth: 32, points: [[850, -40], [862, 140], [856, 310]] },                 // north-east wall
+    { halfWidth: 32, points: [[848, 470], [838, 560], [790, 680], [720, 755]] },     // east → south-east
+    { halfWidth: 32, points: [[595, 835], [470, 880], [300, 885], [215, 876]] },     // south wall
+    { halfWidth: 32, points: [[75, 868], [-40, 860]] }                               // south-west stub
+];
+// Pass centres (the gaps between the ridges above)
+const MOUNTAIN_PASSES = [
+    { name: 'East Pass',       x: 852, y: 390 },
+    { name: 'South-East Pass', x: 657, y: 795 },
+    { name: 'South-West Pass', x: 145, y: 872 }
+];
+
 // ========== CITIES ==========
 // Neutral towns full of civilians the player must protect. The enemy will raid them.
 // Houses and civilians are NOT in game.units / game.buildings (so player units never
 // target them); enemy targeting, splash and nukes include them via game.cityTargets().
 const CITY_SITES = [
-    { name: 'Millbrook', x: 900,  y: 430  },
+    { name: 'Millbrook', x: 1010, y: 470  },
     { name: 'Riverton',  x: 1450, y: 1350 },
     { name: 'Oakford',   x: 2050, y: 520  },
     { name: 'Ashdale',   x: 520,  y: 1480 }
@@ -4588,7 +4605,7 @@ class Game {
             }
         }
         if (this.overlapsCity(x, y)) return 'Cannot build on top of a town!';
-        if (this.areaHasWater(x, y, newBuildingSize, newBuildingSize)) return 'Cannot build on water!';
+        if (this.areaHasWater(x, y, newBuildingSize, newBuildingSize)) return 'Cannot build on water or mountains!';
         if (this.nearBridge(x, y, 40)) return 'Cannot block a bridge!';
 
         if (team === this.playerTeam) {
@@ -4643,7 +4660,31 @@ class Game {
         });
         this.bridges = this.rivers.flatMap(r => r.bridges);
 
-        // Rasterise water into a coarse grid so lookups are O(1)
+        // Mountain ridges: segments for the blocking grid, plus pre-placed peaks for drawing
+        let mSeed = 7;
+        const mRng = () => { mSeed = (mSeed * 1664525 + 1013904223) >>> 0; return mSeed / 0xffffffff; };
+        this.mountains = MOUNTAIN_RIDGES.map(m => {
+            const segs = [];
+            for (let i = 0; i < m.points.length - 1; i++) segs.push([m.points[i], m.points[i + 1]]);
+            return { halfWidth: m.halfWidth, points: m.points, segs };
+        });
+        this.mountainPeaks = [];
+        this.mountains.forEach(m => m.segs.forEach(([a, b]) => {
+            const len = Math.hypot(b[0] - a[0], b[1] - a[1]);
+            const nx = -(b[1] - a[1]) / len, ny = (b[0] - a[0]) / len;
+            for (let d = 0; d < len; d += 22) {
+                const t = d / len, side = (mRng() - 0.5) * m.halfWidth * 0.9;
+                const size = 20 + mRng() * 20;
+                this.mountainPeaks.push({
+                    x: a[0] + (b[0] - a[0]) * t + nx * side,
+                    y: a[1] + (b[1] - a[1]) * t + ny * side,
+                    s: size, snow: size > 31
+                });
+            }
+        }));
+        this.mountainPeaks.sort((p, q) => p.y - q.y); // back-to-front
+
+        // Rasterise water (and rock) into a coarse grid so lookups are O(1)
         const cs = this.waterCell = 8;
         this.waterCols = Math.ceil(this.worldWidth / cs);
         this.waterRows = Math.ceil(this.worldHeight / cs);
@@ -4666,7 +4707,15 @@ class Game {
                             Math.abs(lx * b.n.x + ly * b.n.y) < b.halfLen + 4) { water = false; break; }
                     }
                 }
-                if (water) this.waterGrid[row * this.waterCols + col] = 1;
+                if (water) { this.waterGrid[row * this.waterCols + col] = 1; continue; }
+                // Mountains are impassable rock (stored as 2; isWater() treats any non-zero as blocked)
+                for (const m of this.mountains) {
+                    let rock = false;
+                    for (const sg of m.segs) {
+                        if (segDist(x, y, sg[0][0], sg[0][1], sg[1][0], sg[1][1]) < m.halfWidth) { rock = true; break; }
+                    }
+                    if (rock) { this.waterGrid[row * this.waterCols + col] = 2; break; }
+                }
             }
         }
 
@@ -4681,6 +4730,13 @@ class Game {
                     x = b.x + b.n.x * off * side; y = b.y + b.n.y * off * side;
                 }
                 this.bridgeNodes.push({ x, y });
+            });
+        });
+        MOUNTAIN_PASSES.forEach(p => {
+            const dx = p.x - 200, dy = p.y - 200, d = Math.hypot(dx, dy) || 1; // direction away from the base
+            [-70, 0, 70].forEach(off => {
+                const x = p.x + dx / d * off, y = p.y + dy / d * off;
+                if (!this.isWater(x, y)) this.bridgeNodes.push({ x, y });
             });
         });
         this.nodeEdges = this.bridgeNodes.map(() => []);
@@ -4700,7 +4756,7 @@ class Game {
         if (!this.waterGrid) return false;
         const col = Math.floor(x / this.waterCell), row = Math.floor(y / this.waterCell);
         if (col < 0 || row < 0 || col >= this.waterCols || row >= this.waterRows) return false;
-        return this.waterGrid[row * this.waterCols + col] === 1;
+        return this.waterGrid[row * this.waterCols + col] !== 0; // water (1) or mountain rock (2)
     }
 
     // Any water inside a w×h box centred on (x, y)?
@@ -4821,6 +4877,57 @@ class Game {
             ctx.fillRect(-L, -W - 3, L * 2, 5);
             ctx.fillRect(-L, W - 2, L * 2, 5);
             ctx.restore();
+        });
+        ctx.restore();
+    }
+
+    renderMountains() {
+        const ctx = this.ctx, cam = this.camera;
+        ctx.save();
+        ctx.lineJoin = 'round';
+        ctx.lineCap = 'round';
+        // Rocky base band under the peaks
+        this.mountains.forEach(m => {
+            const trace = () => {
+                ctx.beginPath();
+                m.points.forEach(([x, y], i) => i === 0 ? ctx.moveTo(x - cam.x, y - cam.y) : ctx.lineTo(x - cam.x, y - cam.y));
+            };
+            trace(); ctx.strokeStyle = 'rgba(0,0,0,0.25)'; ctx.lineWidth = m.halfWidth * 2 + 18; ctx.stroke();
+            trace(); ctx.strokeStyle = '#5a5347'; ctx.lineWidth = m.halfWidth * 2 + 8; ctx.stroke();
+            trace(); ctx.strokeStyle = '#6e6658'; ctx.lineWidth = m.halfWidth * 2 - 6; ctx.stroke();
+        });
+        // Peaks: lit west face, shadowed east face, snow on the tall ones
+        this.mountainPeaks.forEach(p => {
+            const sx = p.x - cam.x, sy = p.y - cam.y, s = p.s;
+            if (sx < -s * 2 || sx > cam.width + s * 2 || sy < -s * 2 || sy > cam.height + s * 2) return;
+            const apexY = sy - s * 0.85, baseY = sy + s * 0.4;
+            ctx.fillStyle = '#9b9384';
+            ctx.beginPath(); ctx.moveTo(sx - s * 0.9, baseY); ctx.lineTo(sx, apexY); ctx.lineTo(sx, baseY); ctx.closePath(); ctx.fill();
+            ctx.fillStyle = '#6b6457';
+            ctx.beginPath(); ctx.moveTo(sx, apexY); ctx.lineTo(sx + s * 0.9, baseY); ctx.lineTo(sx, baseY); ctx.closePath(); ctx.fill();
+            if (p.snow) {
+                ctx.fillStyle = '#F5F5F5';
+                ctx.beginPath();
+                ctx.moveTo(sx, apexY);
+                ctx.lineTo(sx - s * 0.28, apexY + s * 0.34);
+                ctx.lineTo(sx - s * 0.08, apexY + s * 0.26);
+                ctx.lineTo(sx + s * 0.06, apexY + s * 0.36);
+                ctx.lineTo(sx + s * 0.28, apexY + s * 0.34);
+                ctx.closePath();
+                ctx.fill();
+            }
+        });
+        // Pass names so players know where the gaps are
+        ctx.font = 'bold 12px Arial';
+        ctx.textAlign = 'center';
+        MOUNTAIN_PASSES.forEach(p => {
+            const sx = p.x - cam.x, sy = p.y - cam.y;
+            if (sx < -100 || sx > cam.width + 100 || sy < -100 || sy > cam.height + 100) return;
+            ctx.fillStyle = 'rgba(0,0,0,0.5)';
+            const w = ctx.measureText(p.name).width + 10;
+            ctx.fillRect(sx - w / 2, sy - 9, w, 16);
+            ctx.fillStyle = '#E0D6C2';
+            ctx.fillText(p.name, sx, sy + 3);
         });
         ctx.restore();
     }
@@ -6047,6 +6154,9 @@ class Game {
         // Draw static decorations (rocks, dirt patches, trees)
         this.drawDecorations();
 
+        // Mountain ridges stand above the ground clutter but below buildings and units
+        this.renderMountains();
+
         this.resourceDeposits.forEach(deposit => {
             if (deposit.amount > 0 &&
                 deposit.x > this.camera.x - buffer &&
@@ -6255,6 +6365,14 @@ class Game {
         });
         ctx.fillStyle = '#C8A26B';
         this.bridges.forEach(b => ctx.fillRect(b.x * scaleX - 2.5, b.y * scaleY - 2.5, 5, 5));
+        // Mountains
+        ctx.strokeStyle = '#8a8172';
+        this.mountains.forEach(m => {
+            ctx.lineWidth = Math.max(3, m.halfWidth * 2 * scaleX);
+            ctx.beginPath();
+            m.points.forEach(([x, y], i) => i === 0 ? ctx.moveTo(x * scaleX, y * scaleY) : ctx.lineTo(x * scaleX, y * scaleY));
+            ctx.stroke();
+        });
         ctx.restore();
 
         // Fog (same soft texture as the main view) drawn under the markers so dots stay bright

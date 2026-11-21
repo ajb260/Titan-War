@@ -145,6 +145,12 @@ Defined in `RIVERS` (polyline + `halfWidth` + bridge points). `Game.initRivers()
 
 ---
 
+## Mountains
+
+`MOUNTAIN_RIDGES` (polylines + half-width) ring the player's base; `MOUNTAIN_PASSES` are the three gaps (East, South-East, South-West). Rock is rasterised into the same grid as water (value `2`; water is `1`), so `isWater()` means "blocked ground" and all river logic (pathing, building, spawning, civilians) applies automatically. Each pass adds three pathfinding nodes (inside, centre, outside). Helicopters fly over. Millbrook was moved to (1010, 470) to clear the east ridge.
+
+---
+
 ## Towns & Civilians
 
 Neutral towns (`City`, `House`, `Civilian` classes; sites in `CITY_SITES`) the player must protect. Missions 1–3 have 2 towns, 4–8 have 3, 9+ have 4. Each town has 7 houses with 2 civilians each.
